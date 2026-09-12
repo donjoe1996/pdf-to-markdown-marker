@@ -119,10 +119,13 @@ On an M2 the full run takes ~7 hours. `colab/Being_and_Time_Colab.ipynb` runs
 the same pipeline on a free Colab T4, which has roughly 3x the memory bandwidth
 and enough spare VRAM to OCR several pages at once.
 
-Copy the project folder to Drive (everything except `.venv/` and `output/` —
-a few hundred KB) along with the PDF, then open the notebook and run the cells.
-Output is written back to Drive, so a disconnected session resumes rather than
-restarting.
+Open `colab/Being_and_Time_Colab.ipynb` in Colab and run the cells. It clones
+this repo, so there is nothing to copy but the PDF: put the scan in a Drive
+folder and point cell 4 at it. Output is written back to Drive, so a
+disconnected session resumes rather than restarting.
+
+The PDF stays out of git deliberately — it is large, and the scan is not ours
+to redistribute.
 
 The notebook handles the two Colab-specific obstacles: marker's NVIDIA backend
 wants Docker (unavailable there, so the llama.cpp CUDA path is forced), and

@@ -523,3 +523,101 @@ that the building is safe.
 Tests catch mistakes; CI makes sure those tests are actually run, on a clean
 machine, every time — which is what turns "we have tests" into "we know the code
 works".
+
+---
+
+## Q6 — Why is the worker loop the most important thing left to test?
+
+**As asked:** *"Elaborate in plain English: the biggest remaining gap is the
+worker loop — `run_one()` with `jobs.start` stubbed, to pin that an early stop
+counts as progress and a stalled job doesn't burn attempts."*
+
+**Sharpened:** *What does the worker loop actually decide, why can those
+decisions go wrong silently, and how do you test something whose real work takes
+hours?*
+
+### What the worker loop is
+
+The worker is the program that keeps books transcribing overnight without
+supervision. Its job is a repeating cycle:
+
+1. Is anything already running? Wait if so.
+2. Is there enough disk? Wait if not.
+3. Pick the next book that needs work.
+4. Run it.
+5. Look at what happened and decide what that means.
+6. Repeat.
+
+`run_one()` is steps 3–5 — **one turn of that cycle**, on one book.
+
+### Step 5 is where the risk is
+
+Steps 1–4 are mechanical. Step 5 is a *judgement*, and judgements are where bugs
+hide.
+
+When a run ends, the worker must decide whether it went well. It cannot simply
+check that the program exited normally, because on this machine runs stop early
+**all the time** — the disk guard halts them once space runs low, which is
+normal here, not exceptional. A book finishes as many short cycles rather than
+one long run.
+
+So the judgement is made on **chunks**: did the number of finished pages go up?
+
+| Outcome | Meaning | Action |
+|---|---|---|
+| chunks went up | real work happened | retry the same book |
+| chunks did not move | nothing was achieved | count a failed attempt |
+| three failures in a row | something is wrong with this book | mark stalled, move on |
+
+### The two silent failures
+
+**If an early stop were miscounted as failure.** Every normal run here stops
+early, so every book would accumulate "failures", reach three, and be abandoned
+— while transcribing perfectly well. You would wake to a queue where every book
+had been marked stalled, with nothing visibly broken.
+
+**If a genuinely stuck book never counted as failure.** The worker would retry it
+forever, and one bad file would block every other book indefinitely. Again
+nothing looks wrong: the worker is "busy", just achieving nothing.
+
+Neither throws an error. Neither appears in a log as a crash.
+
+### What "stubbing `jobs.start`" means
+
+`jobs.start()` launches a real transcription — loads the model, runs OCR, takes
+hours. A test cannot do that.
+
+So it is replaced with a **stand-in**: *do not launch anything, just write two
+chunk files and return*. Then check the worker concluded "progress was made".
+Another stand-in writes nothing, and the worker should conclude "no progress"
+and count an attempt.
+
+What is being tested is the **judgement**, not the OCR. That runs in
+milliseconds instead of hours — and the judgement is the part at risk, since the
+OCR itself is marker's code rather than this project's.
+
+### Why this gap matters more than the others
+
+Everything else tested here runs while somebody is watching: you make a change,
+run it, look at the result.
+
+The worker runs when nobody is watching — that is its entire purpose. A wrong
+judgement there produces no error message. It produces **a night of nothing
+happening**, or a night of work thrown away, discovered hours later, having lost
+exactly the time the worker exists to save.
+
+It is also the only remaining untested piece that makes decisions on its own.
+The other gaps (`warmup`, `preflight`, `gpu_setup`) mostly either work or fail
+loudly at startup, where it would be noticed immediately.
+
+### The honest caveat
+
+None of this checks that OCR produces good text — nothing in the suite does. It
+checks only that the worker *counts* and *decides* correctly. A narrower claim,
+but the one thing currently unguarded.
+
+### One-line summary
+
+The worker's only real decision is "did that run accomplish anything?", it makes
+it unattended, and getting it wrong silently wastes the nights it was built to
+use — so it is worth testing with the expensive part faked out.

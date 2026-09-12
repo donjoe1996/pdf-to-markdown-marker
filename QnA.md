@@ -215,3 +215,116 @@ more than raw speed, is why the Colab path exists: not just faster, but *stable*
 Swap shows up because RAM is oversubscribed — and it is ruinous here rather than
 merely slow because an LLM has no memory locality, so every page the OS evicts is
 needed again within milliseconds.
+
+---
+
+## Q3 — What did we build for testing, and why does it matter?
+
+**As asked:** *"Summary in plain English on what we have done for the test side
+and why it matters."*
+
+**Sharpened:** *What does the test suite actually consist of, why was it built
+this way rather than some other way, and what does it buy when adding features
+to a program that takes hours to run?*
+
+### The problem it solves
+
+The pipeline had grown to roughly 3,000 lines across 13 modules with **no tests
+at all**, and more functionality was coming.
+
+The risk was never breaking something obviously. It was breaking something
+*quietly*: change one thing, and a book transcribed overnight comes out subtly
+wrong — noticed days later, after hours of compute were spent producing it. On a
+job this slow, late discovery is what costs.
+
+### What was built — three layers, fastest first
+
+| Layer | Time | Catches |
+|---|---|---|
+| `ruff` (a linter) | ~1s | names used but never defined, unused imports |
+| Unit tests | ~1s | individual pieces: gutter detection, text transforms, queue state |
+| Integration + golden tests | seconds | whole stages wired together, compared against saved known-good output |
+
+The linter reads the code without running it. It earns its place because the
+failure it catches happened here twice: code that compiled cleanly and only blew
+up when execution finally reached that line — for one bug, once per chunk, hours
+into a run.
+
+**79 tests in about 1.4 seconds.** The speed is deliberate, not incidental: a
+suite that takes a minute is one you skip when in a hurry, and a skipped suite
+protects nothing. The few slow tests — which boot the Streamlit app — are marked
+separately and run in CI instead.
+
+Real OCR is deliberately **excluded**. It needs the models and hours per run, so
+it could never be part of a suite anyone actually runs. Output quality is still
+checked the way it always was, by `bt/verify.py` against real output.
+
+### Why *these* tests
+
+Most of them pin a defect that **actually happened** while building this, and say
+so in the docstring. Among them: chunk files quietly duplicating passages,
+running-head removal eating real body text, finished jobs still looking like they
+were running, one book's output folder adopted by another, and a verification
+check that passed for the wrong reason.
+
+This follows characterization testing (Feathers, *Working Effectively with Legacy
+Code*): with working code and no tests, first pin the behaviour you have, *then*
+change things. The tests describe what the code does today — which is exactly
+what "prove I did not break it" requires.
+
+The reasoning is simple: finding those bugs cost real time. Nobody should spend
+that time twice.
+
+### Proving the suite actually works
+
+A test suite that has never been seen failing is not known to work. Plenty pass
+because they are not really checking anything.
+
+So two of the real bugs were **deliberately reintroduced** — the chunk-directory
+glob and the bare-rule page separator — and the suite was confirmed to go red for
+each (four failures and two respectively). Both files were then restored
+byte-identically.
+
+### Proving it is safe to run
+
+Parts of this code have teeth. `stop_pids()` runs a global `pkill -f
+llama-server`, sentinel cleanup deletes from the real model cache, and the worker
+lock lives in the repo's `output/`. A worker is usually mid-book while tests run,
+so a careless test could destroy hours of real work.
+
+An autouse fixture in `tests/conftest.py` redirects every piece of that at a
+temporary directory. The suite was then run *while the worker was processing*,
+and its lock, its chunks and the three real sentinel files were all confirmed
+untouched afterwards.
+
+Fixtures are synthetic and generated rather than copied from real output — the
+real output is book text, which cannot be committed. `conftest.py` builds
+marker-shaped markdown and draws test PDFs with PyMuPDF, including synthetic
+two-page spreads with a blank gutter. There are no binary fixtures in the repo.
+
+### Two real bugs it found while being written
+
+- `app.py` called `Path.relative_to()` unguarded, so pointing the GUI at an
+  output folder outside the project would have taken the whole page down with an
+  unhandled `ValueError`.
+- Three `zip()` calls had no `strict=`. The one pairing queue rows with edited
+  rows would have silently written a *Skip* toggle to the **wrong document** if
+  the two ever diverged.
+
+Neither had surfaced yet. Both are fixed.
+
+### What it buys, and what it does not
+
+Before committing a change, one command takes a second. Green means the
+behaviour already relied on is intact; red names which behaviour broke and why.
+The same runs automatically on GitHub on every push.
+
+What it does **not** cover: OCR *quality*. No test here can tell you the Greek
+came out right — that needs the models, and it stays with `bt/verify.py` against
+real output.
+
+### One-line summary
+
+Three layers — lint, unit, integration — that run in about a second, built mostly
+out of bugs that already happened, proven to fail when those bugs return, and
+isolated so they can run safely while a real transcription is in progress.

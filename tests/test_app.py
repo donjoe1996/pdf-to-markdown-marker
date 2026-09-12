@@ -40,9 +40,32 @@ def test_app_runs_without_exception(app):
     assert not app.exception, [str(e.value) for e in app.exception]
 
 
+def has_documents(at) -> bool:
+    return any(o.endswith(".pdf") for o in at.selectbox[0].options)
+
+
 def test_queue_panel_is_present(app):
-    """The queue is how the unattended worker is understood from the GUI."""
+    """The queue is how the unattended worker is understood from the GUI.
+
+    Only rendered once a document is selected: with an empty library the script
+    stops early, which is the correct behaviour and is covered separately below.
+    """
+    if not has_documents(app):
+        pytest.skip("no documents; the empty-library path is tested separately")
     assert "Queue" in [s.value for s in app.subheader]
+
+
+def test_empty_library_degrades_gracefully(app):
+    """CI runs with no PDFs at all, since they are gitignored.
+
+    That is a path a local run never takes, so it is worth pinning: the app must
+    explain itself rather than render a broken half-page or raise.
+    """
+    if has_documents(app):
+        pytest.skip("library is not empty here; CI covers this path")
+    assert not app.exception
+    assert any("Choose a PDF" in i.value for i in app.info)
+    assert any("Upload" in o for o in app.selectbox[0].options)
 
 
 def test_document_picker_offers_upload(app):

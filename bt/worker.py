@@ -46,6 +46,14 @@ BACKOFF_DISK = 300.0
 # MIN_FREE_GB, so beginning one at 2.1 GB would manage a chunk or two at best.
 START_FREE_GB = MIN_FREE_GB + 1.5
 
+# A job that writes neither a chunk nor a line of log for this long is stuck.
+# "Process alive" is not evidence of work: a job waiting on a dead model server
+# sits there for the full startup timeout (1800s here) looking perfectly
+# healthy. A chunk takes ~11 minutes at observed speeds, and the pipeline runs
+# unbuffered, so 20 minutes of complete silence is well outside normal.
+STALL_TIMEOUT = 1200.0
+WATCH_POLL = 30.0
+
 _stop = False
 
 
@@ -71,6 +79,42 @@ def _sleep(seconds: float) -> None:
         time.sleep(min(2.0, max(0.0, deadline - time.time())))
 
 
+def _log_size(path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return -1
+
+
+def supervise(pid: int, out_dir, log_file) -> str:
+    """Wait for a job, killing it if it goes silent. Returns "exited"|"stalled".
+
+    Liveness is judged by *output*, not by the process existing: a new chunk
+    appearing, or the log growing. The pipeline runs unbuffered and prints
+    progress continuously, so a working job always moves one of the two.
+    """
+    seen = (bt_queue.chunks_in(out_dir), _log_size(log_file))
+    last_change = time.time()
+
+    while jobs.is_alive(pid):
+        _sleep(WATCH_POLL)
+        if _stop:
+            break
+        now = (bt_queue.chunks_in(out_dir), _log_size(log_file))
+        if now != seen:
+            seen, last_change = now, time.time()
+            continue
+        idle = time.time() - last_change
+        if idle > STALL_TIMEOUT:
+            log(
+                f"  no chunk and no log output for {idle / 60:.0f} min -- "
+                "treating as stalled and stopping it"
+            )
+            jobs.stop_pids([pid])
+            return "stalled"
+    return "exited"
+
+
 def run_one(state: bt_queue.DocState, chunk_size: int, dry_run: bool = False) -> bool:
     """Run one cycle on one document. Returns whether any chunk was added."""
     before = bt_queue.chunks_in(state.out_dir)
@@ -83,6 +127,13 @@ def run_one(state: bt_queue.DocState, chunk_size: int, dry_run: bool = False) ->
         log("  dry run -- not launching")
         return False
 
+    # Sentinels naming a dead server make the next run wait on a health check
+    # that can never pass -- for the full 1800s startup timeout. Clearing them
+    # first prevents the hang; the watchdog below only catches what slips past.
+    stale = jobs.clear_stale_sentinels()
+    if stale:
+        log(f"  cleared stale model-server sentinels: {', '.join(stale)}")
+
     spec = bt_queue.spec_for(state, chunk_size)
     try:
         started = jobs.start(spec)
@@ -90,16 +141,19 @@ def run_one(state: bt_queue.DocState, chunk_size: int, dry_run: bool = False) ->
         log(f"  could not start: {exc}")
         return False
 
+    outcome = "exited"
     if started.pid:
-        jobs.wait_for_pid(started.pid)
+        outcome = supervise(started.pid, state.out_dir, jobs.log_path(state.out_dir))
 
     after = bt_queue.chunks_in(state.out_dir)
     progressed = after > before
     bt_queue.record_attempt(
-        state.key, progressed, error="" if progressed else "no chunks advanced"
+        state.key,
+        progressed,
+        error="" if progressed else f"no chunks advanced ({outcome})",
     )
     log(
-        f"  finished {state.key}: {before} -> {after} chunks"
+        f"  finished {state.key}: {before} -> {after} chunks ({outcome})"
         + ("" if progressed else "  (no progress)")
     )
     return progressed

@@ -98,7 +98,72 @@ def _alive(pid: int) -> bool:
         os.kill(pid, 0)  # signal 0 tests existence without touching the process
     except OSError:
         return False
+
+    # A finished child that nobody has reaped stays in the process table as a
+    # zombie, and signal 0 still succeeds for it. Since the worker launches jobs
+    # as its own children, treating a zombie as running would leave it waiting
+    # on a job that already finished -- and the watchdog would eventually
+    # "stop" a process that exited long ago.
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.stdout.strip().startswith("Z"):
+            try:  # best effort: reap it if it is ours, so it stops piling up
+                os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, OSError):
+                pass
+            return False
+    except (OSError, subprocess.SubprocessError):
+        pass  # cannot tell; assume alive rather than kill a live job
     return True
+
+
+def is_alive(pid: int) -> bool:
+    """Public alias -- other modules need this without reaching for a private."""
+    return _alive(pid)
+
+
+# surya records each model server it spawns here, so a later run can attach to
+# one that is already up instead of paying the start-up cost again.
+SURYA_SENTINEL_DIR = Path("~/.cache/datalab/surya").expanduser()
+
+
+def clear_stale_sentinels() -> list[str]:
+    """Delete sentinels whose server process is gone.
+
+    When a run ends, ``shutdown_models()`` stops the servers but the sentinel
+    files can outlive them. The next run then reads a sentinel, tries to attach
+    to a dead port, and waits on a health check that can never succeed -- for
+    the full ``*_SERVER_STARTUP_TIMEOUT``, which this project raises to 1800s to
+    survive slow first-run downloads. The symptom is a job that looks perfectly
+    healthy (process alive, no error) while doing nothing for half an hour.
+
+    Observed exactly that: a sentinel naming a dead pid, nothing listening on
+    its port, and the job burning 1m23s of CPU across 14 minutes.
+    """
+    removed: list[str] = []
+    try:
+        files = sorted(SURYA_SENTINEL_DIR.glob("*_server.json"))
+    except OSError:
+        return removed
+
+    for path in files:
+        try:
+            pid = int(json.loads(path.read_text(encoding="utf-8")).get("pid", 0))
+        except (ValueError, OSError, TypeError, KeyError):
+            pid = 0  # unreadable sentinel is no use to anyone either
+        if pid and _alive(pid):
+            continue
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except OSError:
+            pass
+    return removed
 
 
 def find_pipeline_processes(exclude_pid: int | None = None) -> list[tuple[int, str]]:

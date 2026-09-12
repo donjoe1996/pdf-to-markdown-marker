@@ -115,6 +115,41 @@ otherwise look complete on resume and silently truncate the book.
 directory splices overlapping page ranges into a duplicated book when
 `--chunk-size` changes between runs.
 
+## The GUI (`app.py`)
+
+`uv run streamlit run app.py`. A launcher and monitor, not the pipeline.
+
+**Why it runs a subprocess.** Streamlit re-executes its script on every
+interaction, so a long job cannot live inside the app. `bt/jobs.py` launches
+`bt.run` detached and reconstructs status **entirely from disk** — chunk files
+are already written atomically and skipped on resume, so they *are* the
+progress record. The GUI holds no state; close the browser or restart the app
+and the run is untouched.
+
+**Concurrency guard.** `jobs.find_pipeline_processes()` scans `ps` for any
+`bt.run`/`bt.transcribe` process, not just ones the GUI started — a run
+launched from a terminal has no lock file, and starting a second alongside it
+is the worst thing possible on this hardware (two llama-servers → swap → see
+`QnA.md` Q2).
+
+**Generalisation for other PDFs.** `bt/analyze.py` decides split/OCR per
+document. The decisive OCR signal is **full-page image coverage**: if a raster
+covers the whole page, any text on it came from someone else's OCR, whatever
+the producer string says. Producer names and run-on counts are too weak — a
+scan of Marcus Aurelius reports "LuraDocument", has zero run-ons, and would
+otherwise be misread as typeset.
+
+Running-head removal is now **frequency-based** (`postprocess.find_running_heads`):
+lines recurring at page edges across >30% of pages, with digits normalised
+away. Repetition alone is not sufficient — `_could_be_head()` also requires the
+line to look like a *label* (short, no sentence-ending punctuation, no footnote
+markup), because templated body text repeats too and was being eaten.
+
+`verify.check_not_embedded_layer()` is the general form of the stale-layer
+check: it compares output against the PDF's own text **page by page**, using
+marker's `{N}` separators to align them. Comparing whole-document blobs passes
+for the wrong reason — different pages always look different.
+
 ## Running on a GPU (Colab)
 
 `colab/Being_and_Time_Colab.ipynb` + `bt/gpu_setup.py`. Two facts shape it:

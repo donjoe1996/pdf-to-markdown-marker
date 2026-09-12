@@ -10,6 +10,9 @@ dependencies = [
     # Parallel ranged downloads; the plain hub client stalls at 0 bytes on a
     # throttled link when fetching the ~1.3 GB VLM weights.
     "hf-transfer>=0.1.9",
+    # The local GUI. Needs >=1.37 for st.fragment(run_every=...), which lets the
+    # progress panel refresh without re-running the whole script.
+    "streamlit>=1.37",
 ]
 
 [project.scripts]

@@ -54,23 +54,32 @@ def build_config(
     mode: str = "fast",
     dpi: int = 300,
     use_llm: bool = False,
+    ocr: bool = True,
 ) -> dict:
     """Config dict for ``ConfigParser``.
 
     ``page_range`` is a *string* here because ConfigParser runs it through
     ``parse_range_str``; a hand-built config would need a list[int] instead.
+
+    ``ocr=False`` is the born-digital fast path: marker reads the PDF's existing
+    text layer instead of running the vision model, which turns hours into
+    seconds. Only correct when that layer is trustworthy -- ``bt.analyze`` makes
+    that call. For a scan it would reproduce whatever the old OCR got wrong.
     """
     config: dict = {
         "output_format": "markdown",  # ConfigParser KeyErrors without this
-        # The embedded Acrobat OCR layer is unusable -- ignore it and re-OCR.
-        "force_ocr": True,
-        "strip_existing_ocr": True,
-        # The scan is 300 DPI; marker's default of 192 loses the footnote type.
         "highres_image_dpi": dpi,
         "paginate_output": True,  # keeps book pages addressable downstream
-        "disable_image_extraction": True,  # -> extract_images=False; text-only book
+        "disable_image_extraction": True,  # -> extract_images=False
         "mode": mode,
     }
+    if ocr:
+        # Ignore any embedded text layer and re-read the page from the image.
+        config["force_ocr"] = True
+        config["strip_existing_ocr"] = True
+    else:
+        # Pure text-layer extraction; turns off all VLM calls.
+        config["disable_ocr"] = True
     if page_range is not None:
         config["page_range"] = page_range
     if use_llm:
@@ -119,6 +128,7 @@ def transcribe(
     dpi: int = 300,
     use_llm: bool = False,
     resume: bool = True,
+    ocr: bool = True,
 ) -> Path:
     """OCR ``pdf_path`` in resumable chunks and concatenate to ``out_md``.
 
@@ -160,7 +170,9 @@ def transcribe(
 
             target = _chunk_path(chunk_dir, first, last)
             started = time.time()
-            config = build_config(f"{first}-{last}", mode=mode, dpi=dpi, use_llm=use_llm)
+            config = build_config(
+                f"{first}-{last}", mode=mode, dpi=dpi, use_llm=use_llm, ocr=ocr
+            )
             converter = make_converter(config, artifacts)
             text = convert_range(converter, pdf_path)
             # Write via a temp file and rename: a chunk killed mid-write would
@@ -240,6 +252,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dpi", type=int, default=300, help="highres_image_dpi")
     ap.add_argument("--use-llm", action="store_true", help="enable LLM hybrid mode")
     ap.add_argument("--no-resume", action="store_true", help="redo completed chunks")
+    ap.add_argument(
+        "--no-ocr",
+        action="store_true",
+        help="read the existing text layer instead of OCRing (born-digital PDFs "
+        "only -- on a scan this reproduces the old OCR's mistakes)",
+    )
     args = ap.parse_args(argv)
 
     with pymupdf.open(args.pdf) as doc:
@@ -256,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         dpi=args.dpi,
         use_llm=args.use_llm,
         resume=not args.no_resume,
+        ocr=not args.no_ocr,
     )
     return 0
 

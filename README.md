@@ -113,6 +113,30 @@ the same command to pick up where it stopped.
 | `--use-llm` | LLM hybrid mode — mainly helps the polytonic Greek. Needs a key; see marker's docs |
 | `--no-resume` | redo chunks that already exist |
 
+## Web GUI
+
+```bash
+uv run streamlit run app.py
+```
+
+A local page for pointing the pipeline at any PDF without remembering flags.
+It inspects the file first and pre-fills the settings, because the two
+expensive choices are easy to get wrong and costly to undo:
+
+- **Split spreads?** Correct for a scanned two-page spread; on a normal PDF it
+  would cut every page in half. Detected from landscape shape plus a blank
+  central band, and shown as a before/after preview so a wrong guess is caught
+  before a multi-hour run rather than after.
+- **OCR, or read the existing text?** A born-digital PDF extracts in seconds.
+  A scan needs OCR — and the giveaway is that its pages are *full-page images*,
+  so any text on them came from someone else's OCR, however clean it looks.
+
+Long runs happen in a detached subprocess, with progress read back from the
+chunk files on disk. You can close the browser, restart the app, or reboot the
+GUI and the run is still there; **Resume** continues from the last finished
+chunk. The app also refuses to start while another pipeline is running
+anywhere on the machine — two at once push it into swap and slow both down.
+
 ## Running on a GPU instead (Google Colab)
 
 On an M2 the full run takes ~7 hours. `colab/Being_and_Time_Colab.ipynb` runs

@@ -51,12 +51,16 @@ def _ink_profile(page: pymupdf.Page) -> np.ndarray:
     return (arr < 128).sum(axis=0)
 
 
-def find_gutter(ink: np.ndarray) -> float:
-    """Return the gutter position as a fraction of page width.
+def find_gutter(ink: np.ndarray) -> tuple[float, float]:
+    """Return ``(gutter position, blank band width)``, both as fractions of width.
 
     Uses the *widest* run of zero-ink columns in the central band. Taking
     ``argmin`` instead does not work: the entire gutter reads zero, so argmin
     returns whichever zero it meets first and drifts toward the band edge.
+
+    The band width is the confidence signal: a real gutter shows a sustained
+    blank strip, while a single-page document has only incidental gaps between
+    words. ``detect_spreads`` uses it to decide whether splitting applies at all.
     """
     width = len(ink)
     lo, hi = int(width * SEARCH_LO), int(width * SEARCH_HI)
@@ -75,8 +79,66 @@ def find_gutter(ink: np.ndarray) -> float:
             run = 0
 
     if best_len == 0:
-        return 0.5  # no clear gutter; fall back to the midpoint
-    return (lo + best_start + best_len / 2) / width
+        return 0.5, 0.0  # no clear gutter; fall back to the midpoint
+    return (lo + best_start + best_len / 2) / width, best_len / width
+
+
+# A spread is landscape *and* has a sustained blank strip down the middle.
+# Both are required: a landscape slide has no gutter, and a portrait page can
+# have an incidental central gap between two words.
+SPREAD_MIN_BAND = 0.015  # blank strip, as a fraction of page width
+SPREAD_MIN_RATIO = 0.6  # share of sampled pages that must look like spreads
+
+
+def detect_spreads(doc: pymupdf.Document, sample: int = 20) -> dict:
+    """Decide whether this document stores two book pages per PDF page.
+
+    Samples pages spread through the document rather than scanning all of them;
+    the layout of a scanned book does not change halfway through.
+    """
+    total = doc.page_count
+    if total == 0:
+        return {"is_spread": False, "reason": "empty document", "checked": 0}
+
+    step = max(1, total // sample)
+    idxs = list(range(0, total, step))[:sample]
+
+    landscape = spreads = 0
+    bands, gutters = [], []
+    for i in idxs:
+        page = doc[i]
+        rect = page.rect
+        is_landscape = rect.width > rect.height
+        landscape += is_landscape
+        gutter, band = find_gutter(_ink_profile(page))
+        bands.append(band)
+        gutters.append(gutter)
+        if is_landscape and band >= SPREAD_MIN_BAND:
+            spreads += 1
+
+    ratio = spreads / len(idxs)
+    is_spread = ratio >= SPREAD_MIN_RATIO
+    if is_spread:
+        reason = (
+            f"{spreads}/{len(idxs)} sampled pages are landscape with a blank "
+            f"central band (median gutter at "
+            f"{sorted(gutters)[len(gutters) // 2]:.3f} of width)"
+        )
+    elif landscape == 0:
+        reason = "pages are portrait -- single pages, nothing to split"
+    else:
+        reason = (
+            f"landscape, but only {spreads}/{len(idxs)} pages show a blank "
+            "central band -- looks like wide single pages, not spreads"
+        )
+
+    return {
+        "is_spread": is_spread,
+        "reason": reason,
+        "checked": len(idxs),
+        "landscape": landscape,
+        "median_band": sorted(bands)[len(bands) // 2] if bands else 0.0,
+    }
 
 
 def split_document(
@@ -95,7 +157,7 @@ def split_document(
         page = src[src_idx]
         rect = page.rect
         ink = _ink_profile(page)
-        gutter = find_gutter(ink)
+        gutter, _band = find_gutter(ink)
 
         cut_px = int(gutter * len(ink))
         left_ink, right_ink = int(ink[:cut_px].sum()), int(ink[cut_px:].sum())

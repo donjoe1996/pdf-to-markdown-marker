@@ -15,6 +15,7 @@ Run with ``--report`` to see what each would change without writing anything.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,27 +25,67 @@ from pathlib import Path
 # into one "page" (which breaks per-page footnote namespacing).
 PAGE_SEPARATOR = re.compile(r"^\{(\d+)\}-{10,}$", re.MULTILINE)
 
-# Running heads look like "82  Being and Time  I. 2" (verso) and
-# "INT. I  Being and Time  27" (recto). Rather than enumerate the section-label
-# formats (INT. I, I. 2, II. 1, ...), which is brittle against OCR noise, a head
-# is identified structurally: a short line carrying the title and a page number.
-HEAD_TITLE = re.compile(r"being\s+and\s+time", re.IGNORECASE)
+# Running heads are found by *repetition*, not by matching a known title. A head
+# like "82  Being and Time  I. 2" varies only in its numbers from page to page,
+# so normalising digits away makes it identical across the book -- whereas real
+# body text essentially never recurs. This works on any document; matching a
+# hard-coded title only ever worked on one.
 HEAD_MAX_LEN = 60
+HEAD_FREQUENCY = 0.30  # share of pages a line must appear on to count as a head
+HEAD_SCAN_LINES = 2  # heads live at the very top or bottom of a page
+HEAD_MIN_PAGES = 4  # below this, repetition proves nothing
 
 
-def is_running_head(line: str) -> bool:
-    stripped = line.strip().strip("*_# ")
-    if not stripped or len(stripped) > HEAD_MAX_LEN:
+def normalise_head(line: str) -> str:
+    """Collapse a line to its page-invariant form (digits and case removed)."""
+    s = line.strip().strip("*_# ")
+    s = re.sub(r"\d+", "#", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _could_be_head(line: str) -> bool:
+    """Shape test applied before frequency is even considered.
+
+    Repetition alone is not enough. Body text can repeat too -- a templated
+    sentence normalises to the same form on every page, and would otherwise be
+    stripped as a head. A running head is a short *label*: it does not end in
+    sentence punctuation and carries no footnote markup.
+    """
+    s = line.strip().strip("*_# ")
+    if not s or len(s) > HEAD_MAX_LEN:
         return False
-    if not HEAD_TITLE.search(stripped):
-        return False
-    # Every running head carries a page number; the title page ("BEING AND
-    # TIME" alone) does not, and must survive.
-    if not re.search(r"\d", stripped):
-        return False
-    # A citation such as "See Being and Time, p. 42." ends in sentence
-    # punctuation; a running head never does.
-    return stripped[-1] not in ".,;:"
+    if s[-1] in ".,;:!?":
+        return False  # a sentence, not a label
+    if "<sup>" in s or re.search(r"\[\^", s):
+        return False  # footnote text, not a head
+    return True
+
+
+def _edge_lines(body: str) -> list[str]:
+    lines = [ln for ln in body.split("\n") if ln.strip()]
+    if not lines:
+        return []
+    return lines[:HEAD_SCAN_LINES] + lines[-HEAD_SCAN_LINES:]
+
+
+def find_running_heads(pages: list[tuple[int, str]]) -> set[str]:
+    """Normalised forms that recur at page edges often enough to be heads."""
+    if len(pages) < HEAD_MIN_PAGES:
+        return set()
+
+    counts: Counter[str] = Counter()
+    for _, body in pages:
+        # Count each distinct form once per page, so a line repeated twice on
+        # one page cannot manufacture a false majority.
+        seen = {normalise_head(ln) for ln in _edge_lines(body) if _could_be_head(ln)}
+        counts.update(seen)
+
+    threshold = max(HEAD_MIN_PAGES, int(len(pages) * HEAD_FREQUENCY))
+    return {form for form, n in counts.items() if form and n >= threshold}
+
+
+def is_running_head(line: str, heads: set[str]) -> bool:
+    return _could_be_head(line) and normalise_head(line) in heads
 
 # A marginal Niemeyer number sits alone on its own line once marker has pulled
 # it out of the margin. Heidegger's German pagination runs 1..437.
@@ -66,6 +107,7 @@ class Stats:
     footnotes_namespaced: int = 0
     hyphens_joined: int = 0
     margin_sequence: list[int] = field(default_factory=list)
+    head_forms: list[str] = field(default_factory=list)
 
     def render(self) -> str:
         seq = self.margin_sequence
@@ -79,6 +121,10 @@ class Stats:
             f"footnotes namespaced : {self.footnotes_namespaced}",
             f"hyphen joins         : {self.hyphens_joined}",
         ]
+        if self.head_forms:
+            shown = ", ".join(repr(f) for f in self.head_forms[:4])
+            more = " ..." if len(self.head_forms) > 4 else ""
+            lines.append(f"head patterns found  : {len(self.head_forms)} ({shown}{more})")
         if seq:
             lines.append(f"H-number range       : {seq[0]}..{seq[-1]}")
             if gaps:
@@ -112,10 +158,13 @@ def split_pages(text: str) -> list[tuple[int, str]]:
     return pages
 
 
-def strip_running_head(page: str, stats: Stats) -> str:
+def strip_running_head(page: str, heads: set[str], stats: Stats) -> str:
     out = []
+    edges = set(_edge_lines(page))
     for line in page.split("\n"):
-        if is_running_head(line):
+        # Only strip at the page edges: an identical string mid-paragraph is
+        # body text, not a running head.
+        if line in edges and is_running_head(line, heads):
             stats.heads_removed += 1
             continue
         out.append(line)
@@ -184,10 +233,15 @@ def process(
     pages = split_pages(text)
     stats.pages = len(pages)
 
+    # First pass: learn which lines recur at page edges across the whole
+    # document. Head removal needs the corpus, so it cannot be decided per page.
+    head_forms = find_running_heads(pages) if heads else set()
+    stats.head_forms = sorted(head_forms)
+
     done = []
     for page_no, page in pages:
         if heads:
-            page = strip_running_head(page, stats)
+            page = strip_running_head(page, head_forms, stats)
         if margins:
             page = convert_margin_numbers(page, stats)
         if footnotes:

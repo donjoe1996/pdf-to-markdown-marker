@@ -37,8 +37,15 @@ class Finding:
     detail: str
 
 
-def check_text_layer_replaced(text: str) -> Finding:
-    hits = [m for m in STALE_LAYER_MARKERS if m.lower() in text.lower()]
+def check_text_layer_replaced(text: str, markers: list[str] | None = None) -> Finding:
+    """Look for artefacts of a *known* bad text layer.
+
+    The default list is specific to the Being and Time scan. For another
+    document, pass markers observed in its own embedded layer, or rely on
+    ``check_not_embedded_layer`` which needs no prior knowledge.
+    """
+    markers = STALE_LAYER_MARKERS if markers is None else markers
+    hits = [m for m in markers if m.lower() in text.lower()]
     if hits:
         return Finding(
             "fresh OCR",
@@ -60,38 +67,121 @@ def check_run_ons(text: str) -> Finding:
     return Finding("word spacing", True, f"{len(hits)} run-on words")
 
 
-def check_greek(text: str) -> Finding:
-    """The opening page and many footnotes carry polytonic Greek."""
+def check_not_embedded_layer(text: str, pdf_path, sample: int = 8) -> Finding:
+    """Generic version of the stale-layer check -- needs no prior knowledge.
+
+    Compares the output against the PDF's *own* embedded text. If OCR really
+    ran, the two differ in the places the old layer got wrong. Near-identical
+    output means marker read the embedded layer instead of the page image.
+
+    Only meaningful when fresh OCR was requested; for a born-digital extraction
+    high similarity is the correct outcome, not a fault.
+    """
+    import difflib
+
+    import pymupdf
+
+    from bt.postprocess import split_pages
+
+    def norm(s: str) -> str:
+        return re.sub(r"\s+", " ", s).strip().lower()
+
+    # Compare like with like. marker's paginated output labels each page with
+    # its source index ("{7}----"), so the output page can be matched to the
+    # very page it came from. Comparing whole-document blobs instead makes the
+    # result depend on which pages happened to be sampled -- different pages
+    # always look different, which would pass this check for the wrong reason.
+    pages = [(n, body) for n, body in split_pages(text) if norm(body)]
+    if not pages:
+        return Finding("fresh OCR", True, "no paginated output to compare")
+
+    step = max(1, len(pages) // sample)
+    picked = pages[::step][:sample]
+
+    ratios = []
+    with pymupdf.open(pdf_path) as doc:
+        for page_no, body in picked:
+            if page_no >= doc.page_count:
+                continue
+            embedded = norm(doc[page_no].get_text("text"))
+            if len(embedded) < 200:
+                continue
+            ratios.append(
+                difflib.SequenceMatcher(None, embedded, norm(body)[:20000]).ratio()
+            )
+
+    if not ratios:
+        return Finding(
+            "fresh OCR", True, "no meaningful embedded text to compare against"
+        )
+
+    avg = sum(ratios) / len(ratios)
+    if avg > 0.90:
+        return Finding(
+            "fresh OCR",
+            False,
+            f"output is {avg:.0%} identical to the PDF's own text layer across "
+            f"{len(ratios)} pages -- marker probably reused it instead of OCRing",
+        )
+    return Finding(
+        "fresh OCR",
+        True,
+        f"output differs from the embedded layer ({avg:.0%} similar over "
+        f"{len(ratios)} aligned pages)",
+    )
+
+
+# These three describe *content*, so their absence is only a fault when the
+# document is known to contain them. Plenty of PDFs have no Greek, no italics
+# and no footnotes; failing on that would make the report meaningless.
+def check_greek(text: str, required: bool = False) -> Finding:
     greek = re.findall(r"[Ͱ-Ͽἀ-῿]+", text)
     if not greek:
-        return Finding(
-            "greek", False, "no Greek characters found -- expected on book page 1"
-        )
+        return Finding("greek", not required, "no Greek characters found")
     return Finding("greek", True, f"{len(greek)} Greek runs recognised")
 
 
-def check_italics(text: str) -> Finding:
+def check_italics(text: str, required: bool = False) -> Finding:
     n = len(re.findall(r"(?<!\*)\*(?!\*)[^*\n]+\*(?!\*)", text))
     if n == 0:
-        return Finding("italics", False, "no italic spans -- emphasis was lost")
+        return Finding("italics", not required, "no italic spans found")
     return Finding("italics", True, f"{n} italic spans")
 
 
-def check_footnotes(text: str) -> Finding:
+def check_footnotes(text: str, required: bool = False) -> Finding:
     n = len(re.findall(r"\[\^[^\]]+\]|<sup>", text))
     if n == 0:
-        return Finding("footnotes", False, "no footnote markers found")
+        return Finding("footnotes", not required, "no footnote markers found")
     return Finding("footnotes", True, f"{n} footnote markers")
 
 
-def run_all(text: str) -> list[Finding]:
-    return [
-        check_text_layer_replaced(text),
-        check_run_ons(text),
-        check_greek(text),
-        check_italics(text),
-        check_footnotes(text),
-    ]
+def run_all(
+    text: str,
+    pdf_path=None,
+    markers: list[str] | None = None,
+    expect: tuple[str, ...] = (),
+    fresh_ocr: bool = True,
+) -> list[Finding]:
+    """Check transcribed Markdown.
+
+    ``pdf_path`` enables the generic embedded-layer comparison, which needs no
+    prior knowledge of the document; without it only the hard-coded artefact
+    list is available. ``expect`` names content that must be present
+    ("greek", "italics", "footnotes") -- anything unnamed is reported but
+    cannot fail. ``fresh_ocr=False`` skips the OCR checks entirely, since for a
+    born-digital extraction matching the embedded layer is correct.
+    """
+    findings: list[Finding] = []
+    if fresh_ocr:
+        if pdf_path is not None:
+            findings.append(check_not_embedded_layer(text, pdf_path))
+        else:
+            findings.append(check_text_layer_replaced(text, markers))
+    findings.append(check_run_ons(text))
+    findings.append(check_greek(text, "greek" in expect))
+    findings.append(check_italics(text, "italics" in expect))
+    findings.append(check_footnotes(text, "footnotes" in expect))
+    return findings
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -144,6 +144,40 @@ GUI and the run is still there; **Resume** continues from the last finished
 chunk. The app also refuses to start while another pipeline is running
 anywhere on the machine — two at once push it into swap and slow both down.
 
+## Keeping the machine busy — the queue worker
+
+```bash
+uv run python -m bt.worker
+```
+
+Transcription takes hours, so the expensive waste is idle time: a book that
+finishes at midnight does nothing until someone notices in the morning. The
+worker picks up the next document the moment the previous one stops, and keeps
+watching for new ones, so overnight hours become progress.
+
+It processes **every PDF** in the project root and `uploads/` — drop a file in
+and it gets transcribed eventually. The GUI's **Queue** panel shows the order,
+each book's progress, and a per-book *Skip* toggle.
+
+Two design points, both consequences of how this machine behaves:
+
+- **A run stopping early is normal, not a failure.** The disk guard halts a run
+  once free space runs low, which here happens after a few chunks. The worker
+  waits for the disk to recover and resumes the *same* book, so a book finishes
+  as many short cycles rather than one long run. It judges success by whether
+  chunks advanced, not by exit status — a run that transcribed two chunks before
+  stopping made progress.
+- **Only one job runs at a time.** Two would push the machine into swap and slow
+  both down, so the worker waits for anything already running, including a job
+  you started by hand.
+
+A document that completes several attempts without advancing a single chunk is
+marked *stalled* and the worker moves on, rather than blocking the queue.
+
+The worker runs as its own process rather than inside the GUI because Streamlit
+only executes its script while a browser is connected — with the tab closed,
+nothing would tick.
+
 ## Running on a GPU instead (Google Colab)
 
 On an M2 the full run takes ~7 hours. `colab/Being_and_Time_Colab.ipynb` runs

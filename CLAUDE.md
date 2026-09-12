@@ -186,6 +186,41 @@ check: it compares output against the PDF's own text **page by page**, using
 marker's `{N}` separators to align them. Comparing whole-document blobs passes
 for the wrong reason — different pages always look different.
 
+## The queue worker (`bt/worker.py`, `bt/queue.py`)
+
+`uv run python -m bt.worker` — processes every discovered PDF, one at a time,
+indefinitely. It exists so the machine does not idle between books.
+
+**Standalone process, not part of the GUI.** Streamlit runs its script only
+while a browser session is connected, so a queue driven from `app.py` would stop
+the moment the tab closed.
+
+**State is derived, not tracked.** `queue.survey()` reads progress from chunk
+files; `output/queue.json` persists only `skip`, `attempts`, `last_error` and a
+cached analysis. Do not add a progress field there — it could only drift from
+the chunk files, which are the truth.
+
+**Completion is `chunks_done >= chunks_total`, never "output exists".**
+`run.py` writes `raw.md` and a final `.md` even when the disk guard cut the run
+short, and its exit code reports *verification*, not completion. `stopped_early`
+never leaves `transcribe()`.
+
+**An early stop is the normal case, not an error.** Runs here stop after a few
+chunks by design (see Resource constraints). The worker cools down so swap can
+drain, then resumes the same book. Success is measured as *chunks advanced*, so
+a run that stopped early after real work does not burn an attempt.
+`START_FREE_GB = MIN_FREE_GB + 1.5` keeps it from starting a run with only
+enough room for a chunk or two.
+
+`jobs.PIPELINE_CMD` matches `-m bt.run` / `-m bt.transcribe` specifically. It was
+a loose substring test, which matched a transient process belonging to its own
+inspection command — a false positive makes the worker wait for a job that does
+not exist. `bt.worker` and `bt.queue` deliberately do not match.
+
+`queue.resolve_out_dir()` is the single source of truth for where a document's
+chunks live; `app.py` uses it too, so the GUI and worker cannot disagree and
+resume one book onto another's output.
+
 ## Running on a GPU (Colab)
 
 `colab/Being_and_Time_Colab.ipynb` + `bt/gpu_setup.py`. Two facts shape it:

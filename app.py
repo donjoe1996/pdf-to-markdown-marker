@@ -16,6 +16,7 @@ import pymupdf
 import streamlit as st
 
 from bt import jobs
+from bt import queue as bt_queue
 from bt.analyze import analyze
 from bt.split_spreads import _ink_profile, find_gutter
 
@@ -114,38 +115,11 @@ stat = pdf_path.stat()
 st.sidebar.caption(f"{stat.st_size / 1e6:.1f} MB")
 
 
-def chunks_in(folder: Path) -> int:
-    return len(list((folder / "chunks").glob("[0-9]*-[0-9]*.md")))
-
-
-def folder_belongs_to(folder: Path, pdf: Path) -> bool:
-    """Whether a folder's chunks were produced from this PDF.
-
-    Chunk files are named by page number only, so they carry no hint of which
-    document they came from. Adopting a folder on the strength of "it has
-    chunks" would let one book resume onto another's output -- skipping chunks
-    that are somebody else's pages. The lock file records the source PDF, so
-    that is what decides ownership.
-    """
-    spec = jobs.status(folder).spec
-    if not spec or not spec.pdf:
-        return False
-    try:
-        return Path(spec.pdf).resolve() == pdf.resolve()
-    except OSError:
-        return False
-
-
-# Where a run's chunks live decides whether it can resume. New runs get a
-# per-document folder, but earlier CLI runs wrote straight into output/, so look
-# there too -- but only when that folder is actually this document's.
-per_doc = OUTPUT_ROOT / pdf_path.stem
-if chunks_in(per_doc):
-    default_out = per_doc
-elif chunks_in(OUTPUT_ROOT) and folder_belongs_to(OUTPUT_ROOT, pdf_path):
-    default_out = OUTPUT_ROOT
-else:
-    default_out = per_doc
+# Resolving this in bt.queue keeps the GUI and the worker agreeing on where a
+# document's chunks live. If they disagreed, one could resume onto the other's
+# output -- see queue.folder_belongs_to for why ownership comes from the lock.
+default_out = bt_queue.resolve_out_dir(pdf_path)
+chunks_in = bt_queue.chunks_in
 
 out_text = st.sidebar.text_input(
     "Output folder",
@@ -189,6 +163,73 @@ if runs:
             "Stopping keeps every finished chunk — the job resumes from where "
             "it left off whenever you come back to it."
         )
+
+# --------------------------------------------------------------------------
+# queue: what the worker will do next, unattended
+# --------------------------------------------------------------------------
+st.subheader("Queue")
+
+worker = jobs.worker_pid()
+if worker:
+    st.success(
+        f"Worker running (pid {worker}). When a book finishes or stops, the "
+        "next one starts on its own.",
+        icon=":material/autoplay:",
+    )
+else:
+    st.warning(
+        "No worker running — books will not advance on their own. Start one in "
+        "a terminal and leave it going:",
+        icon=":material/pause_circle:",
+    )
+    st.code("uv run python -m bt.worker", language="bash")
+
+queue_states = bt_queue.survey()
+rows = [
+    {
+        "Document": s.key,
+        "Status": s.status,
+        "Progress": s.fraction,
+        "Chunks": f"{s.chunks_done}/{s.chunks_total}" if s.chunks_total else "—",
+        "Skip": s.skip,
+    }
+    for s in queue_states
+]
+edited = st.data_editor(
+    rows,
+    hide_index=True,
+    width="stretch",
+    disabled=["Document", "Status", "Progress", "Chunks"],
+    column_config={
+        "Progress": st.column_config.ProgressColumn(
+            "Progress", min_value=0.0, max_value=1.0, format="%.0f%%"
+        ),
+        "Skip": st.column_config.CheckboxColumn(
+            "Skip", help="Leave this document out of the queue"
+        ),
+    },
+    key="queue_editor",
+)
+
+# Persist only what changed; writing every row on every rerun would churn the
+# file and fight the user's next click.
+for original, row in zip(queue_states, edited):
+    if bool(row.get("Skip")) != original.skip:
+        bt_queue.set_skip(original.key, bool(row.get("Skip")))
+
+nxt = bt_queue.next_pending()
+stalled = [s for s in queue_states if s.status == "stalled"]
+st.caption(
+    f"Next up: **{nxt.key}**" if nxt else "Nothing pending — every document is done or skipped."
+)
+if stalled:
+    st.warning(
+        "Stopped making progress after repeated attempts: "
+        + ", ".join(s.key for s in stalled)
+        + ". The worker has moved on; clear the attempt count by unskipping or "
+        "investigate that document.",
+        icon=":material/error:",
+    )
 
 # --------------------------------------------------------------------------
 # 1. analysis

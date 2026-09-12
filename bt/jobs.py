@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -25,6 +26,9 @@ from pathlib import Path
 
 LOCK_NAME = ".run.lock"
 LOG_NAME = "run.log"
+
+# `python -m bt.run …` / `python -m bt.transcribe …`, however it was launched.
+PIPELINE_CMD = re.compile(r"-m\s+bt\.(run|transcribe)\b")
 
 
 @dataclass
@@ -119,9 +123,11 @@ def find_pipeline_processes(exclude_pid: int | None = None) -> list[tuple[int, s
         if not line:
             continue
         pid_s, _, cmd = line.partition(" ")
-        if not (" bt.run" in f" {cmd}" or "bt.transcribe" in cmd):
-            continue
-        if "ps -axo" in cmd:
+        # Match an actual module invocation, not any command line that happens
+        # to contain the text. A loose substring test matched a transient
+        # process of its own inspection command; a false positive here makes the
+        # worker sit and wait for a job that does not exist.
+        if not PIPELINE_CMD.search(cmd):
             continue
         try:
             pid = int(pid_s)
@@ -299,6 +305,48 @@ def stop(out_dir: str | Path) -> bool:
 def clear_lock(out_dir: str | Path) -> None:
     """Remove a stale lock left by a crashed run."""
     lock_path(out_dir).unlink(missing_ok=True)
+
+
+WORKER_LOCK = "output/.worker.lock"
+
+
+def worker_lock_path(root: Path | None = None) -> Path:
+    base = root or Path(__file__).resolve().parent.parent
+    return base / WORKER_LOCK
+
+
+def worker_pid() -> int | None:
+    """The queue worker's pid, if one is alive."""
+    lock = worker_lock_path()
+    if not lock.exists():
+        return None
+    try:
+        pid = int(json.loads(lock.read_text(encoding="utf-8"))["pid"])
+    except (ValueError, KeyError, OSError, TypeError):
+        return None
+    return pid if _alive(pid) else None
+
+
+def claim_worker_lock() -> bool:
+    """Register this process as the worker. False if one is already running."""
+    if worker_pid() is not None:
+        return False
+    lock = worker_lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(
+        json.dumps({"pid": os.getpid(), "started": time.time()}), encoding="utf-8"
+    )
+    return True
+
+
+def release_worker_lock() -> None:
+    worker_lock_path().unlink(missing_ok=True)
+
+
+def wait_for_pid(pid: int, poll: float = 5.0) -> None:
+    """Block until a process exits."""
+    while _alive(pid):
+        time.sleep(poll)
 
 
 def per_page_seconds(st: JobStatus) -> float | None:

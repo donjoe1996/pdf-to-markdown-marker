@@ -70,8 +70,15 @@ def human_time(seconds: float) -> str:
 
 
 def find_pdfs() -> list[Path]:
+    """PDFs in the project root and in uploads/.
+
+    Uploaded files are saved to uploads/ so they survive a reload -- without
+    listing that folder they would disappear from the picker as soon as the
+    uploader widget cleared, stranding work already done on them.
+    """
+    found = list(ROOT.glob("*.pdf")) + list((ROOT / "uploads").glob("*.pdf"))
     return sorted(
-        p for p in ROOT.glob("*.pdf") if not p.name.startswith(".")
+        (p for p in found if not p.name.startswith(".")), key=lambda p: p.name.lower()
     )
 
 
@@ -81,7 +88,10 @@ def find_pdfs() -> list[Path]:
 st.sidebar.title("📄 PDF → Markdown")
 
 pdfs = find_pdfs()
-labels = [p.name for p in pdfs] + ["Upload a file…"]
+# Label by path relative to the project, not bare filename: uploads/ files live
+# in a subfolder, and resolving a bare name against the root would miss them.
+by_label = {str(p.relative_to(ROOT)): p for p in pdfs}
+labels = list(by_label) + ["Upload a file…"]
 choice = st.sidebar.selectbox("Document", labels, index=0 if pdfs else len(labels) - 1)
 
 pdf_path: Path | None = None
@@ -94,7 +104,7 @@ if choice == "Upload a file…":
             dest.write_bytes(up.getbuffer())
         pdf_path = dest
 else:
-    pdf_path = ROOT / choice
+    pdf_path = by_label.get(choice)
 
 if pdf_path is None or not pdf_path.exists():
     st.info("Choose a PDF in the sidebar to begin.")
@@ -108,12 +118,34 @@ def chunks_in(folder: Path) -> int:
     return len(list((folder / "chunks").glob("[0-9]*-[0-9]*.md")))
 
 
+def folder_belongs_to(folder: Path, pdf: Path) -> bool:
+    """Whether a folder's chunks were produced from this PDF.
+
+    Chunk files are named by page number only, so they carry no hint of which
+    document they came from. Adopting a folder on the strength of "it has
+    chunks" would let one book resume onto another's output -- skipping chunks
+    that are somebody else's pages. The lock file records the source PDF, so
+    that is what decides ownership.
+    """
+    spec = jobs.status(folder).spec
+    if not spec or not spec.pdf:
+        return False
+    try:
+        return Path(spec.pdf).resolve() == pdf.resolve()
+    except OSError:
+        return False
+
+
 # Where a run's chunks live decides whether it can resume. New runs get a
 # per-document folder, but earlier CLI runs wrote straight into output/, so look
-# there too -- otherwise finished work is invisible and the button says "Start"
-# when it should say "Resume".
+# there too -- but only when that folder is actually this document's.
 per_doc = OUTPUT_ROOT / pdf_path.stem
-default_out = next((c for c in (per_doc, OUTPUT_ROOT) if chunks_in(c)), per_doc)
+if chunks_in(per_doc):
+    default_out = per_doc
+elif chunks_in(OUTPUT_ROOT) and folder_belongs_to(OUTPUT_ROOT, pdf_path):
+    default_out = OUTPUT_ROOT
+else:
+    default_out = per_doc
 
 out_text = st.sidebar.text_input(
     "Output folder",
@@ -127,8 +159,36 @@ if existing_chunks:
     st.sidebar.success(f"{existing_chunks} chunks already done here", icon=":material/history:")
 
 # A pipeline running anywhere on this machine matters, not just one we started.
-foreign = jobs.find_pipeline_processes()
+# Only one may run at a time, so this is effectively the session state: show it
+# up front, and let it be cancelled from here rather than leaving the user stuck
+# with a disabled button and no way out.
+runs = jobs.active_runs()
 job = jobs.status(out_dir)
+
+if runs:
+    with st.container(border=True):
+        st.markdown("**Session in progress** — only one job runs at a time.")
+        for run in runs:
+            row = st.container(horizontal=True, vertical_alignment="center")
+            same_doc = str(pdf_path) == run.pdf
+            row.markdown(
+                f":material/sync: **{run.name}**"
+                f"{'  ·  _this document_' if same_doc else ''}  \n"
+                f"{run.chunks_done} chunks done · `{Path(run.out_dir).name or 'output'}/`"
+            )
+            if row.button(
+                "Stop this job",
+                key=f"stop-{run.pids[0]}",
+                type="secondary",
+                icon=":material/stop_circle:",
+            ):
+                jobs.stop_pids(run.pids)
+                st.toast(f"Stopped {run.name}", icon=":material/stop_circle:")
+                st.rerun()
+        st.caption(
+            "Stopping keeps every finished chunk — the job resumes from where "
+            "it left off whenever you come back to it."
+        )
 
 # --------------------------------------------------------------------------
 # 1. analysis
@@ -211,12 +271,17 @@ else:
 # --------------------------------------------------------------------------
 st.subheader("Run")
 
-if foreign and not job.running:
-    st.error(
-        f"A pipeline is already running on this machine (pid "
-        f"{', '.join(str(p) for p, _ in foreign)}). Two at once push this "
-        "machine into swap and slow both down.",
-        icon="🚫",
+busy = bool(runs)
+if busy:
+    others = [r.name for r in runs if str(pdf_path) != r.pdf]
+    st.info(
+        (
+            f"**{others[0]}** is still running. Stop it in the panel above to "
+            "free the machine for this document."
+            if others
+            else "This document is already running — see the panel above."
+        ),
+        icon=":material/hourglass_top:",
     )
 
 total_pages = info.pages * 2 if split else info.pages
@@ -233,9 +298,8 @@ spec = jobs.JobSpec(
 
 b1, b2, _ = st.columns([1, 1, 3])
 if job.running:
-    if b1.button("Stop", type="secondary"):
-        jobs.stop(out_dir)
-        st.rerun()
+    # Stopping is handled by the session panel above, so this is only a hint.
+    b1.button("Running…", disabled=True, icon=":material/sync:")
 else:
     if job.chunks_done:
         total_chunks = -(-total_pages // int(chunk_size)) if chunk_size else 0
@@ -246,7 +310,7 @@ else:
         )
     else:
         label = "Start"
-    if b1.button(label, type="primary", disabled=bool(foreign)):
+    if b1.button(label, type="primary", disabled=busy, icon=":material/play_arrow:"):
         try:
             jobs.start(spec)
             st.rerun()

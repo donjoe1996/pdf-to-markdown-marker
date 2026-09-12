@@ -133,6 +133,94 @@ def find_pipeline_processes(exclude_pid: int | None = None) -> list[tuple[int, s
     return hits
 
 
+@dataclass
+class ActiveRun:
+    """A pipeline running anywhere on this machine, identified from its argv."""
+
+    pids: list[int]
+    pdf: str = ""
+    out_dir: str = ""
+
+    @property
+    def name(self) -> str:
+        return Path(self.pdf).name if self.pdf else "unknown document"
+
+    @property
+    def chunks_done(self) -> int:
+        if not self.out_dir:
+            return 0
+        return len(list((Path(self.out_dir) / "chunks").glob("[0-9]*-[0-9]*.md")))
+
+
+def parse_command(cmd: str) -> dict:
+    """Pull --pdf and --out-dir back out of a running process's command line."""
+    parts = cmd.split()
+    found: dict = {}
+    for flag, key in (("--pdf", "pdf"), ("--out-dir", "out_dir")):
+        if flag in parts:
+            i = parts.index(flag)
+            if i + 1 < len(parts):
+                found[key] = parts[i + 1]
+    return found
+
+
+def active_runs() -> list[ActiveRun]:
+    """Distinct pipeline jobs currently running, however they were started.
+
+    One job shows up as several processes (the ``uv run`` wrapper plus the
+    python child), so they are grouped by the document they are working on --
+    stopping a job has to signal all of them, not just the one you happened to
+    find first.
+    """
+    grouped: dict[tuple[str, str], ActiveRun] = {}
+    for pid, cmd in find_pipeline_processes():
+        info = parse_command(cmd)
+        key = (info.get("pdf", ""), info.get("out_dir", ""))
+        run = grouped.setdefault(
+            key, ActiveRun(pids=[], pdf=key[0], out_dir=key[1])
+        )
+        run.pids.append(pid)
+    return list(grouped.values())
+
+
+def _kill_group(pid: int, sig: int) -> bool:
+    try:
+        os.killpg(os.getpgid(pid), sig)
+        return True
+    except OSError:
+        try:
+            os.kill(pid, sig)
+            return True
+        except OSError:
+            return False
+
+
+def stop_pids(pids: list[int], kill_inference: bool = True) -> bool:
+    """Stop a job by pid, then clean up the inference server it left behind.
+
+    marker spawns ``llama-server`` in its own session, so it does not die with
+    the python process -- observed surviving a parent kill and holding ~2.5 GB
+    indefinitely. SIGTERM first so the pipeline can shut down cleanly and finish
+    writing the chunk in flight; only then force the leftovers.
+    """
+    stopped = any(_kill_group(pid, signal.SIGTERM) for pid in pids)
+
+    for _ in range(20):  # up to ~5s for a clean exit
+        if not any(_alive(p) for p in pids):
+            break
+        time.sleep(0.25)
+    for pid in pids:
+        if _alive(pid):
+            _kill_group(pid, signal.SIGKILL)
+
+    if kill_inference:
+        try:
+            subprocess.run(["pkill", "-f", "llama-server"], capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return stopped
+
+
 def start(spec: JobSpec) -> JobStatus:
     """Launch the pipeline. Refuses if a job is already running here."""
     out = Path(spec.out_dir)
@@ -205,16 +293,7 @@ def stop(out_dir: str | Path) -> bool:
     st = status(out_dir)
     if not (st.running and st.pid):
         return False
-    try:
-        # Kill the whole process group: marker spawns llama-server as a child,
-        # and signalling only the parent would strand it holding GPU/RAM.
-        os.killpg(os.getpgid(st.pid), signal.SIGTERM)
-    except OSError:
-        try:
-            os.kill(st.pid, signal.SIGTERM)
-        except OSError:
-            return False
-    return True
+    return stop_pids([st.pid])
 
 
 def clear_lock(out_dir: str | Path) -> None:

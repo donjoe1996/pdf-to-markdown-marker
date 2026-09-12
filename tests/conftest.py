@@ -139,6 +139,51 @@ def make_pdf(tmp_path):
 
 
 @pytest.fixture
+def make_scan_pdf(tmp_path):
+    """Build a PDF that looks like a *scan*: every page one full-page image.
+
+    This is the distinction ``analyze`` turns on. A scan's pages are photographs
+    of paper, so any text on them came from somebody else's OCR however clean it
+    reads -- which is why coverage, not the producer string, decides.
+
+    ``text_layer=True`` adds extractable text over the image, reproducing a scan
+    that has been OCRed by someone else.
+    """
+
+    def build(
+        name: str,
+        pages: int = 3,
+        text_layer: bool = False,
+        producer: str | None = None,
+    ) -> Path:
+        # Render some prose to a bitmap once, then stamp it on every page.
+        scratch = pymupdf.open()
+        drawn = scratch.new_page(width=400, height=600)
+        _draw(drawn, pymupdf.Rect(30, 30, 370, 570), "Scanned line of text. " * 60)
+        pixmap = drawn.get_pixmap(dpi=72)
+        scratch.close()
+
+        doc = pymupdf.open()
+        for i in range(pages):
+            page = doc.new_page(width=400, height=600)
+            page.insert_image(page.rect, pixmap=pixmap)
+            if text_layer:
+                _draw(
+                    page,
+                    pymupdf.Rect(30, 30, 370, 570),
+                    f"Recognised text for page {i}, as an OCR layer would carry. " * 8,
+                )
+        if producer:
+            doc.set_metadata({"producer": producer})
+        path = tmp_path / name
+        doc.save(path)
+        doc.close()
+        return path
+
+    return build
+
+
+@pytest.fixture
 def write_lock():
     """Write a run lock naming a source PDF, as jobs.start() does."""
 

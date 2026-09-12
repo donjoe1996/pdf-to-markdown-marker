@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        # The lockfile pins marker-pdf, which brings torch. Tests never import
+        # it (marker imports are function-local), but syncing from the lock is
+        # what keeps CI honest about the environment the code actually runs in.
+        run: uv sync --group dev
+
+      - name: Lint
+        # Runs first: undefined names and unused imports are found in under a
+        # second, and there is no point running tests against code that cannot
+        # be right.
+        run: uv run ruff check .
+
+      - name: Test
+        # -m "" overrides the default "not slow" filter. The slow tests are slow
+        # locally because they analyse a real PDF library; CI has none, so they
+        # cost little here and the Streamlit smoke test is worth having.
+        run: uv run pytest -m "" -q

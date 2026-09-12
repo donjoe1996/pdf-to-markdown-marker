@@ -28,7 +28,8 @@ import sys
 import time
 from datetime import datetime
 
-from bt import jobs, queue as bt_queue
+from bt import jobs
+from bt import queue as bt_queue
 from bt.transcribe import MIN_FREE_GB
 
 # Another pipeline is running (possibly started by hand) -- check back soon.

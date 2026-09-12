@@ -121,9 +121,18 @@ st.sidebar.caption(f"{stat.st_size / 1e6:.1f} MB")
 default_out = bt_queue.resolve_out_dir(pdf_path)
 chunks_in = bt_queue.chunks_in
 
+# Shown relative to the project when it lives there, which is the normal case
+# and much easier to read. An output folder elsewhere is shown in full rather
+# than raising -- relative_to() is strict, and an unhandled ValueError here
+# takes down the whole page.
+try:
+    default_label = str(default_out.relative_to(ROOT))
+except ValueError:
+    default_label = str(default_out)
+
 out_text = st.sidebar.text_input(
     "Output folder",
-    value=str(default_out.relative_to(ROOT)),
+    value=default_label,
     help="Holds chunks/, raw.md and the final Markdown. Point it at an existing "
     "folder to resume that run.",
 )
@@ -213,7 +222,9 @@ edited = st.data_editor(
 
 # Persist only what changed; writing every row on every rerun would churn the
 # file and fight the user's next click.
-for original, row in zip(queue_states, edited):
+# strict=True deliberately: these must stay aligned row for row. If they ever
+# diverged, a Skip toggle would be written to the wrong document.
+for original, row in zip(queue_states, edited, strict=True):
     if bool(row.get("Skip")) != original.skip:
         bt_queue.set_skip(original.key, bool(row.get("Skip")))
 
@@ -429,7 +440,7 @@ if result.exists():
         fresh_ocr=ocr,
     )
     cols = st.columns(len(findings))
-    for col, f in zip(cols, findings):
+    for col, f in zip(cols, findings, strict=True):  # cols built from len(findings)
         col.metric(f.name, "ok" if f.ok else "FAIL", help=f.detail)
     for f in findings:
         if not f.ok:

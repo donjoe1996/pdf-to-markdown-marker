@@ -18,6 +18,50 @@ dependencies = [
 [project.scripts]
 bt-transcribe = "bt.run:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    # Catches undefined names and unused imports statically. Two real bugs here
+    # (`re` and `os` used but never imported) compiled cleanly and would only
+    # have failed at runtime, on a path that runs once per chunk.
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Fast by default. The everyday suite must stay quick enough that nobody is
+# tempted to skip it; the slow tests boot Streamlit and analyse real PDFs, so
+# they run in CI and on demand (`pytest -m slow`) rather than on every save.
+addopts = "-q --strict-markers -ra -m 'not slow'"
+markers = [
+    "slow: boots Streamlit or reads real PDFs (seconds to a minute, not milliseconds)",
+]
+
+[tool.ruff]
+target-version = "py312"
+# The Colab notebook is excluded on purpose: its cells run in a fixed order and
+# imports sit where the narrative needs them, so import-ordering rules are wrong
+# there rather than useful.
+exclude = [".venv", "output", "uploads", ".claude", "colab"]
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes (undefined names), I import order, B bugbear,
+# UP pyupgrade. F is the one that earns its place; the rest are cheap.
+select = ["E", "W", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # line length: prose in docstrings is deliberately wrapped by hand
+    "B008",  # function call in default arg: not a pattern used here
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Env vars must be set before torch is imported, so these modules deliberately
+# place imports after module-level statements.
+"bt/transcribe.py" = ["E402"]
+"bt/warmup.py" = ["E402"]
+"bt/worker.py" = ["E402"]
+# Tests reach into private helpers on purpose, to pin behaviour at the seam.
+"tests/*" = ["E402"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

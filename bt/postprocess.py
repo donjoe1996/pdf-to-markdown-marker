@@ -111,9 +111,9 @@ class Stats:
 
     def render(self) -> str:
         seq = self.margin_sequence
-        gaps = [
-            (a, b) for a, b in zip(seq, seq[1:]) if b != a + 1
-        ]
+        # strict=False deliberately: pairing each item with its successor, so
+        # the two sequences differ in length by one by construction.
+        gaps = [(a, b) for a, b in zip(seq, seq[1:], strict=False) if b != a + 1]
         lines = [
             f"pages processed      : {self.pages}",
             f"running heads removed: {self.heads_removed}",

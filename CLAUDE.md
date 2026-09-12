@@ -36,6 +36,45 @@ uv run python -m bt.postprocess output/NAME/raw.md --report  # tune transforms, 
 (gutter detection) in about a minute with no models loaded. `bt.analyze` is
 faster still and answers the two questions that matter before a long run.
 
+## Tests
+
+```bash
+uv run ruff check .          # layer 0: undefined names, unused imports (~1s)
+uv run pytest                # fast suite, ~1s, 79 tests
+uv run pytest -m slow        # Streamlit smoke tests (boot the app; ~1 min locally)
+uv run pytest -m ""          # everything, as CI runs it
+uv run pytest --golden-update   # rewrite golden files -- review the diff
+```
+
+**Run `ruff` before `pytest`.** Two real bugs here were names used but never
+imported (`re`, `os`); they compile cleanly and fail only when that line finally
+executes, which for one of them was once per chunk, hours in.
+
+**Tests must never touch live state.** Several functions have global side
+effects — `stop_pids()` runs `pkill -f llama-server`, `clear_stale_sentinels()`
+deletes from the real `~/.cache/datalab/surya`, and the worker lock lives in the
+repo's `output/`. A worker is often processing books while tests run, so the
+autouse `isolate` fixture in `tests/conftest.py` redirects all of it at
+`tmp_path`. Rules when adding tests:
+
+- Never signal a pid the test did not spawn itself.
+- Call `stop_pids(..., kill_inference=False)`; the default runs a global `pkill`.
+- Do not write under the repo's `output/`.
+
+**Fixtures are synthetic and generated.** Real pipeline output is book text, so
+it can be neither committed nor used as a golden file. `tests/conftest.py`
+builds marker-shaped markdown (`{N}----` separators, `<sup>` markers, running
+heads) with placeholder prose, and draws test PDFs with PyMuPDF — including
+synthetic two-page spreads with a blank gutter. There are no binary fixtures.
+
+**Most tests pin a bug that actually happened** and say so in the docstring. A
+test whose purpose is recorded survives a refactor; one that merely asserts
+something true gets deleted when it becomes inconvenient.
+
+The suite is verified to work by reintroducing two real bugs (the `concatenate`
+glob and the bare-rule page separator) and confirming it goes red — a suite
+never seen failing is not known to work.
+
 ## Working on the GUI
 
 **Load the `developing-with-streamlit` skill before editing `app.py`.** It is

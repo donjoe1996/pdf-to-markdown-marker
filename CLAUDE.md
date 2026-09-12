@@ -4,13 +4,13 @@ Guidance for Claude Code working in this repository.
 
 ## What this is
 
-A pipeline that transcribes a scanned PDF of *Being and Time* (Macquarrie &
-Robinson, 1962) into Markdown, using [marker](https://github.com/datalab-to/marker)
-as the OCR engine. Single-purpose tooling around one specific document, not a
-general library.
+A pipeline that turns scanned PDFs into Markdown using
+[marker](https://github.com/datalab-to/marker) as the OCR engine. It was built
+for one document — a 1962 scan of *Being and Time* stored as two-page spreads —
+and then generalised, so the Heidegger-specific facts below still explain most
+of the design decisions.
 
-Not a git repository. Source PDF: `42700894-Martin-Heidegger-Being-and-Time.pdf`
-(26 MB, 294 pages). Outputs go to `output/`.
+Git repository; `master` is the main branch. Outputs go to `output/<pdf-stem>/`.
 
 ## Commands
 
@@ -20,15 +20,51 @@ brew install llama.cpp                    # REQUIRED: marker 2.0 spawns llama-se
 uv run python -m bt.preflight             # disk / llama-server / marker checks
 uv run python -m bt.warmup                # pre-download ~1.8 GB of models
 
-uv run bt-transcribe --test               # validation slice (source pages 8,40-41)
-uv run bt-transcribe                      # full book, ~14.5 h, resumable
-uv run bt-transcribe --split-only         # stage 1 only; needs no models at all
-uv run python -m bt.verify output/being-and-time.md
-uv run python -m bt.postprocess out/raw.md --report   # tune transforms, write nothing
+uv run streamlit run app.py               # GUI -- the normal entry point
+
+uv run python -m bt.analyze FILE.pdf      # spreads? OCR needed? time estimate?
+uv run bt-transcribe --pdf FILE.pdf                 # full run, resumable
+uv run bt-transcribe --pdf FILE.pdf --split-only    # stage 1 only; no models needed
+uv run bt-transcribe --pdf FILE.pdf --no-split --no-ocr   # single pages, text-layer extract
+uv run python -m bt.verify output/NAME/NAME.md
+uv run python -m bt.postprocess output/NAME/raw.md --report  # tune transforms, write nothing
 ```
 
+**`--pdf` is required** — there is no default document any more.
+
 `--split-only` is the fast feedback loop: it exercises the trickiest logic
-(gutter detection) in about a minute with no models loaded.
+(gutter detection) in about a minute with no models loaded. `bt.analyze` is
+faster still and answers the two questions that matter before a long run.
+
+## Working on the GUI
+
+**Load the `developing-with-streamlit` skill before editing `app.py`.** It is
+installed in this repo (`.claude/skills/developing-with-streamlit`, symlinked
+from the `streamlit` package) and routes to references for layout, caching,
+fragments, session state, theming and testing.
+
+```bash
+streamlit docs st.<command>     # exact signature/params from the installed version
+```
+
+Conventions it enforces that this app follows:
+
+- `use_container_width` is deprecated — use `width="stretch"` / `width="content"`.
+- Prefer native elements over custom HTML/CSS; `st.container(border=True)` for
+  grouping and `st.container(horizontal=True)` for responsive rows.
+- Material Symbols icons (`:material/name:`) over emoji; sentence case for labels.
+- Cache expensive work (`st.cache_data`), and isolate self-refreshing sections in
+  `st.fragment` so the whole script does not rerun.
+
+Test the app **without a browser** using `AppTest`, which executes the script
+in-process and surfaces exceptions a 200 response would hide:
+
+```python
+from streamlit.testing.v1 import AppTest
+at = AppTest.from_file("app.py", default_timeout=300); at.run()
+assert not at.exception
+at.selectbox[0].set_value("meditationsofmar00marc.pdf").run()
+```
 
 ## Architecture
 

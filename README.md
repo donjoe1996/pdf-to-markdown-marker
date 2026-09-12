@@ -78,18 +78,23 @@ rate limits, but it is not what unblocks a stalled download.
 
 ## Use
 
+The **web GUI is the easier entry point** — see below. From the command line:
+
 ```bash
-# Validation slice: book page 1 (dense Greek + big footnote block) + a body spread
-uv run bt-transcribe --test
+# What am I dealing with? Spreads? Does it need OCR? How long will it take?
+uv run python -m bt.analyze FILE.pdf
 
-# The whole book
-uv run bt-transcribe
+# The whole document, resumable
+uv run bt-transcribe --pdf FILE.pdf
 
-# Stage 1 only — needs no models, no llama.cpp, no GPU
-uv run bt-transcribe --split-only
+# Splitting only — needs no models, no llama.cpp, no GPU
+uv run bt-transcribe --pdf FILE.pdf --split-only
+
+# A single-page document whose text layer is trustworthy: seconds, not hours
+uv run bt-transcribe --pdf FILE.pdf --no-split --no-ocr
 ```
 
-Output lands in `output/`:
+Output lands in `output/<pdf-stem>/`:
 
 | File | Contents |
 |---|---|
@@ -110,6 +115,8 @@ the same command to pick up where it stopped.
 | `--dpi N` | `highres_image_dpi` (default 300, matching the scan) |
 | `--pages '8,40-41'` | process specific source pages |
 | `--chunk-size N` | pages per resumable chunk (default 20) |
+| `--no-split` | treat each PDF page as one page (any document not stored as spreads) |
+| `--no-ocr` | read the existing text layer instead of OCRing |
 | `--use-llm` | LLM hybrid mode — mainly helps the polytonic Greek. Needs a key; see marker's docs |
 | `--no-resume` | redo chunks that already exist |
 
@@ -158,33 +165,106 @@ once and cached to Drive).
 
 ## How it works
 
-**Stage 1 — `split_spreads.py`.** Finds the gutter per page by projecting ink
-vertically at 36 DPI and taking the *widest run of zero-ink columns* in the
-central 35–65% band. (Plain `argmin` fails: the whole gutter reads zero, so it
-drifts to the band edge.) Measured gutters on this book land at 0.497–0.514, so
-a hard 50% split would clip text. Halves are emitted with `set_cropbox`, which
-is lossless — marker then resamples the original scan exactly once. Halves
-holding under 2% of the spread's ink are dropped (6 exist: source pages 0, 2,
-8, 9, 32, 250).
+A run passes through six stages. The short version: **look before you leap,
+cut the pages apart, fetch the models, read the pages, tidy the text, then
+prove it actually worked.**
 
-**Stage 2 — `transcribe.py`.** Runs marker with `force_ocr` +
-`strip_existing_ocr` so the bad text layer is never used, at 300 DPI, paginated,
-with image extraction off. Sets `PYTORCH_ENABLE_MPS_FALLBACK=1` (marker's CLI
-sets it; the library doesn't) and `SURYA_INFERENCE_KEEP_ALIVE=1` so the
-inference server is started once rather than per chunk.
+### 0 · Look at the document first — `analyze.py`
 
-**Stage 3 — `postprocess.py`.** Drops running heads, converts marginal numbers
-to inline `[H. 56]` anchors and checks the sequence is consecutive, namespaces
-footnote markers per page (footnote "1" recurs on nearly every page, so
-un-namespaced ids would collide hundreds of times), and rejoins words
-hyphenated across line breaks. Each transform has a `--no-*` switch, and
-`--report` shows what would change without writing.
+Two decisions dominate everything else, and both are expensive to get wrong, so
+the pipeline inspects the file before touching it.
 
-**`verify.py`.** The important one is `check_text_layer_replaced`: the embedded
-Acrobat layer has distinctive damage (`itse1f`, `sorne`, collapsed word
-spacing), so finding any of it in the output proves marker fell back to the old
-text layer instead of OCRing. Also checks word spacing, Greek, italics, and
-footnote markers.
+*Is this one page per page, or two?* A scanned book is often photographed as
+facing pairs. Splitting those is essential; splitting a normal PDF cuts every
+page in half. The giveaway is a page that is both **landscape** and has a
+**blank stripe down the middle**, sampled across ~20 pages.
+
+*Does it need OCR at all?* If the PDF was exported from a word processor its
+text is already perfect and extracting it takes seconds. The reliable test is
+not the metadata but whether **a single image covers the whole page** — if it
+does, the page is a photograph of paper, so any text sitting on it was produced
+by somebody else's OCR, however tidy it looks. That text is then treated as
+untrustworthy rather than reused.
+
+Out of this comes a recommendation, a page count and a time estimate.
+
+### 1 · Check the machine can finish — `preflight.py`
+
+A transcription runs for hours, so the avoidable failures are checked up front:
+a Python version that torch has wheels for, enough free disk, the `llama-server`
+binary marker will try to spawn, and marker itself. Failing in ten seconds beats
+failing in four hours.
+
+### 2 · Cut the spreads apart — `split_spreads.py`
+
+Each scanned page is examined at low resolution and its ink projected into a
+column profile — effectively asking "how much darkness is in each vertical
+slice?" The gutter is the **widest run of completely blank columns** near the
+middle.
+
+Two details matter. Asking merely for the *emptiest* column does not work,
+because the whole gutter is empty and the answer drifts to wherever it first
+looks. And the fold is not at the midpoint — on this book it wanders between
+49.7% and 51.4%, enough that a fixed half-and-half cut would shave text off the
+edges.
+
+The halves are then written as new pages by **changing what part of the original
+is visible**, rather than re-rendering them. Nothing is re-photographed, so the
+OCR stage still sees the original scan at full quality. Halves that are
+essentially blank — the backs of title pages — are dropped rather than sent
+through OCR to produce nothing.
+
+### 3 · Fetch the models before they are needed — `warmup.py`
+
+marker starts each model as its own little server and waits a fixed time for it
+to answer. On a first run that server is still downloading its weights when the
+clock runs out, so marker kills it and reports what looks like a crash.
+Downloading everything in advance turns that into a non-event. It is resumable,
+so an interrupted download costs nothing.
+
+### 4 · Read the pages — `transcribe.py`
+
+This is the slow part, and it is not scanning: a vision model **looks at each
+page and writes the text out**, which is what lets it keep italics, recognise
+Greek, and tell a footnote marker from a number in the prose.
+
+The work is done in **chunks of a few pages**, each written to disk the moment
+it finishes, and a re-run skips whatever is already done. That single decision
+is what makes an hours-long job survivable — interruptions, crashes, closing the
+laptop and a deliberate stop all cost at most one chunk.
+
+Two guards run alongside. Each chunk is written to a temporary file and renamed
+into place, so a job killed mid-write can never leave a half-finished chunk that
+later looks complete. And free disk is checked between chunks, because the model
+pushes this machine into swap, swap grows on the same disk, and a run that fills
+the disk takes the rest of the system with it.
+
+### 5 · Tidy the text — `postprocess.py`
+
+Raw OCR output is accurate but not yet comfortable to read:
+
+- **Running heads** — the title and page number repeated at the top of every
+  page — are found by looking for lines that *recur* at page edges once their
+  numbers are ignored, then removed. Repetition alone is not enough to convict a
+  line, so it must also look like a label rather than a sentence.
+- **Footnote markers are renumbered per page.** Almost every page has a footnote
+  "1", and in one long document those would all collide.
+- **Words broken across a line break** are rejoined.
+
+Each step can be switched off, and a report mode shows what *would* change
+without writing anything.
+
+### 6 · Prove it worked — `verify.py`
+
+The failure worth fearing is silent: marker quietly reads the PDF's existing bad
+text instead of looking at the page, and returns fluent Markdown made of the
+wrong characters. Nothing about it looks broken.
+
+So the output is compared against the PDF's own text layer, **page by page**, and
+near-identical output is treated as a failure rather than a success. Alongside
+that it counts run-on words (the signature of old OCR losing its spaces), plus
+Greek, italics and footnote markers — reported for information, since plenty of
+documents legitimately have none.
 
 ## Known limitations
 

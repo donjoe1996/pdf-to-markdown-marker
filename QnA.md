@@ -328,3 +328,87 @@ real output.
 Three layers — lint, unit, integration — that run in about a second, built mostly
 out of bugs that already happened, proven to fail when those bugs return, and
 isolated so they can run safely while a real transcription is in progress.
+
+---
+
+## Q4 — How do the tests change the way new features get added?
+
+**As asked:** *"How will it affect our next code improvement, for example adding
+new features?"*
+
+**Sharpened:** *With a suite now in place, what actually changes when adding
+functionality — where is the work genuinely safer, and where is it no safer at
+all?*
+
+### The day-to-day change
+
+The loop becomes: **write code → `ruff check` → `pytest` → then watch it run.**
+Two seconds, before starting anything that takes hours.
+
+The real shift is *when* a mistake is found. Previously a fault in text handling
+surfaced only after a book finished, by reading the output and noticing something
+odd. Now it surfaces before the run starts.
+
+### What is genuinely protected
+
+**The golden test does the heavy lifting.** Add a new cleanup step to
+`postprocess` — say stripping page numbers — and if it also quietly eats footnote
+markers, the golden test fails and shows the exact diff. Without it, catching
+that needs someone reading a transcript closely enough to notice.
+
+When a change to the output *is* intended, `pytest --golden-update` rewrites the
+file and the diff gets reviewed. That is the value: the change becomes a
+deliberate, visible decision rather than a silent one.
+
+**New tests inherit the safety.** The autouse fixture redirects every test away
+from the real `output/`, the worker lock and the model cache. It is not possible
+to add a test that accidentally kills a running book.
+
+**The old bugs cannot return quietly.** Each of the dozen has a test naming it.
+That matters most during refactors, where reintroducing something while
+"simplifying" is easy.
+
+### Where features plug in
+
+| Adding… | Lands in | Safety net |
+|---|---|---|
+| a text transform | `postprocess.process()` | strong — unit tests plus golden |
+| queue behaviour | `queue.py` | good — tests build a directory layout and assert what is derived |
+| a GUI panel | `app.py` | smoke test catches exceptions an HTTP 200 hides |
+| an analysis signal | `analyze.py` | **none yet** |
+
+### Where it will not help
+
+Over-trusting a suite is its own risk, so the gaps matter as much as the cover:
+
+- **It says nothing about OCR quality.** Green means the plumbing is intact, not
+  that the Greek came out right. That still needs `bt/verify.py` against real
+  output, and human eyes on a page.
+- **It will not catch marker API changes.** marker is never imported in the fast
+  suite, so an upgrade that breaks the real pipeline passes every test.
+- **`bt/analyze.py` is untested** — and it decides *split or not* and *OCR or
+  not*, the two choices that cost hours when wrong. A bug there is expensive
+  precisely because it is silent.
+- **The worker loop is untested**, and it is what runs unattended overnight.
+
+Covered today: `postprocess`, `split_spreads`, `verify`, `jobs`, `queue`,
+`transcribe`. Not covered: `analyze`, `warmup`, `preflight`, `gpu_setup`, and the
+`worker` loop itself.
+
+### What to add next
+
+Where the remaining risk actually is, in order:
+
+1. **`analyze.py`** — cheapest to test, since `conftest` can already generate
+   PDFs, and the most expensive to get wrong.
+2. **The worker loop** — `run_one()` with `jobs.start` stubbed, pinning that an
+   early stop counts as progress and that a stalled job does not burn attempts.
+
+Neither is large, and both cover code making consequential decisions with nothing
+currently checking them.
+
+### One-line summary
+
+Adding features is meaningfully safer in text processing and the queue, about as
+risky as before in analysis and the worker, and entirely unchanged for anything
+that depends on real OCR.

@@ -115,6 +115,29 @@ otherwise look complete on resume and silently truncate the book.
 directory splices overlapping page ranges into a duplicated book when
 `--chunk-size` changes between runs.
 
+## Running on a GPU (Colab)
+
+`colab/Being_and_Time_Colab.ipynb` + `bt/gpu_setup.py`. Two facts shape it:
+
+- **marker's NVIDIA default needs Docker.** The `vllm` backend spawns the
+  `vllm/vllm-openai` image, and Colab has no Docker daemon. `gpu_setup` forces
+  `SURYA_INFERENCE_BACKEND=llamacpp` instead, whose spawn already passes
+  `-ngl 99` (`LLAMA_CPP_NGL`) — all layers on CUDA on Linux, exactly as it uses
+  Metal on a Mac. Same validated code path, no second one to maintain.
+  (`SURYA_INFERENCE_URL` would also let surya attach to a hand-run vLLM server,
+  if that is ever wanted.)
+- **llama.cpp ships CUDA binaries for Windows only.** Linux release assets are
+  x64/arm64/vulkan/rocm/sycl. So `gpu_setup.build_llama_server()` compiles it
+  with `-DGGML_CUDA=ON` for the detected arch (one arch, for build speed) and
+  caches the binary — point `cache_dir` at Drive so sessions reuse it.
+
+A GPU also allows `SURYA_INFERENCE_PARALLEL > 1` (several pages at once), which
+the memory-starved Mac could not. Each slot costs ~12k ctx of KV cache against a
+~1.5 GB model, so a 16 GB T4 comfortably takes 4.
+
+`preflight.check_llama_server()` honours `LLAMA_CPP_BINARY` before `PATH`,
+because on Colab the binary is never on `PATH`.
+
 ## Resource constraints
 
 This machine runs near-full, and the OCR run is what pushes it over.

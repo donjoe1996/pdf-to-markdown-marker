@@ -9,6 +9,7 @@ in. Everything expensive is gated behind these checks.
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import sys
 from dataclasses import dataclass
@@ -68,8 +69,13 @@ def check_marker() -> Check:
 
 
 def check_llama_server() -> Check:
-    """The surya VLM backend on Apple Silicon / CPU."""
-    exe = shutil.which("llama-server")
+    """The surya VLM backend on Apple Silicon / CPU / CUDA."""
+    # LLAMA_CPP_BINARY is how surya is pointed at a non-PATH build -- which is
+    # the normal case on Colab, where llama.cpp has to be compiled with CUDA
+    # because upstream ships no Linux CUDA binaries.
+    exe = os.environ.get("LLAMA_CPP_BINARY") or shutil.which("llama-server")
+    if exe and os.path.sep in exe and not os.access(exe, os.X_OK):
+        return Check("llama-server", False, f"{exe} is not executable")
     if not exe:
         return Check(
             "llama-server",

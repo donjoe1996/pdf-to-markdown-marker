@@ -113,6 +113,22 @@ the same command to pick up where it stopped.
 | `--use-llm` | LLM hybrid mode — mainly helps the polytonic Greek. Needs a key; see marker's docs |
 | `--no-resume` | redo chunks that already exist |
 
+## Running on a GPU instead (Google Colab)
+
+On an M2 the full run takes ~7 hours. `colab/Being_and_Time_Colab.ipynb` runs
+the same pipeline on a free Colab T4, which has roughly 3x the memory bandwidth
+and enough spare VRAM to OCR several pages at once.
+
+Copy the project folder to Drive (everything except `.venv/` and `output/` —
+a few hundred KB) along with the PDF, then open the notebook and run the cells.
+Output is written back to Drive, so a disconnected session resumes rather than
+restarting.
+
+The notebook handles the two Colab-specific obstacles: marker's NVIDIA backend
+wants Docker (unavailable there, so the llama.cpp CUDA path is forced), and
+llama.cpp publishes CUDA binaries for Windows only (so `llama-server` is built
+once and cached to Drive).
+
 ## How it works
 
 **Stage 1 — `split_spreads.py`.** Finds the gutter per page by projecting ink

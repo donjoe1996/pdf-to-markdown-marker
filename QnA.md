@@ -412,3 +412,114 @@ currently checking them.
 Adding features is meaningfully safer in text processing and the queue, about as
 risky as before in analysis and the worker, and entirely unchanged for anything
 that depends on real OCR.
+
+---
+
+## Q5 — What is CI, why does it matter, and what happens without it?
+
+**As asked:** *"What is CI that we did previously? Why does it matter to do it?
+What if we don't do it?"*
+
+**Sharpened:** *From first principles: what problem does Continuous Integration
+solve, what did we actually configure, and what goes wrong if it is skipped?*
+
+### Start with the problem
+
+We wrote 79 tests. They only protect anything **if someone actually runs them.**
+
+That sounds trivial, but consider how it fails in practice. It is late, the
+change is "obviously fine", and it gets committed unrun. Or the tests are run
+but a file was never saved. Or they pass because of something specific to *this*
+machine.
+
+So there is a gap between "tests exist" and "tests were run against what was
+actually shipped."
+
+### What CI is
+
+**Continuous Integration** is one idea: *every time the code changes, a computer
+that is not yours automatically runs the checks.* The name is grander than the
+concept.
+
+Both words carry weight:
+
+- **Continuous** — every time, automatically, not when someone remembers.
+- **Integration** — it checks the code as committed and combined, not as it
+  happens to exist in one person's working folder.
+
+### What was configured here
+
+One file, `.github/workflows/tests.yml`, telling GitHub what to do on every push:
+
+```
+1. Get a fresh, empty Linux machine
+2. Check out the code from the repository
+3. Install the dependencies
+4. Run ruff
+5. Run pytest (including the slow tests)
+```
+
+Red if anything fails. It takes about 30 seconds.
+
+### Why "a fresh machine" is the whole point
+
+This is the part that matters.
+
+A working machine has *history*: packages installed months ago, stray files,
+forgotten environment settings. When tests pass there, what has been proven is
+"this works **on a machine like this one, with all its accumulated history**."
+That is a weaker claim than it feels.
+
+A fresh machine proves something stronger: **the code works from what is
+actually in the repository.** A file that was never committed, or a hidden
+dependency on something only present locally, simply is not there — and it fails
+at once.
+
+### It proved this on its first run
+
+Not hypothetical. The very first CI run **failed**, usefully.
+
+The PDFs live on the local machine but are not in the repository, so CI ran with
+**no PDFs at all** — a situation the local machine has never been in. In that
+state the app behaves differently: with no document to work on it shows "Choose
+a PDF in the sidebar to begin" and stops. The test had assumed a document always
+exists.
+
+A local run could never have caught that, because locally there are always PDFs.
+The fresh machine found it in 45 seconds.
+
+The tests now describe *both* situations, each skipping where the other applies.
+The empty-library case is checked in CI, the has-documents case locally —
+together covering more than either environment can alone.
+
+### What happens without it
+
+Nothing dramatic on day one. It decays quietly:
+
+- Tests get skipped when rushed. Usually fine; occasionally not, and the news
+  arrives late.
+- Code creeps in that only works on one machine. Six months later it will not run
+  on a new laptop, or on Colab, and the context for debugging it is long gone.
+- Broken code sits in the repository unnoticed, because nothing checks it until
+  someone tries to use it.
+
+None of these hurt *today*. They hurt once the context is forgotten — which is
+exactly when they are expensive.
+
+### The honest limits
+
+- **It only runs the checks that were written.** Green means "the tests passed",
+  not "the code is correct".
+- **It cannot test everything.** This one never touches real OCR, which needs the
+  models and hours, so it says nothing about whether a transcription is *good*.
+- **It does not replace reading the output.** Confirming the Greek came out right
+  is still a human job.
+
+A smoke alarm, not a fire inspector: it says something is obviously burning, not
+that the building is safe.
+
+### One-line summary
+
+Tests catch mistakes; CI makes sure those tests are actually run, on a clean
+machine, every time — which is what turns "we have tests" into "we know the code
+works".

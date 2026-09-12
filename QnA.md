@@ -111,3 +111,107 @@ Two consequences worth knowing, both in `bt/warmup.py`:
 The model is data, the arithmetic happens here, and memory is the only place
 fast enough to hold data that gets re-read 1,500 times per page — so it must be
 downloaded once, then loaded once, before page one.
+
+---
+
+## Q2 — Why does the transcription process end up using swap memory?
+
+**As asked:** *"Why does this transcribe process involve swap memory?"*
+
+**Sharpened:** *Why does running this pipeline make macOS allocate gigabytes of
+swap — growing to ~10 GB on this machine — when `llama-server`'s own working set
+is only about 2 GB? And why does that make the job progressively slower rather
+than just a bit slower?*
+
+### Short answer
+
+Swap appears because everything the run needs at once does not fit in physical
+RAM, so macOS starts moving pages out to disk. That would normally be a mild
+slowdown. Here it is catastrophic, because an LLM re-reads **all** of its weights
+for **every token** — so pages the OS evicts are needed again milliseconds later.
+The usual assumption that makes swap work is false for this workload.
+
+### What swap actually is
+
+RAM is finite. When programs collectively want more than exists, the OS picks
+memory pages that look least recently used, writes them to disk, and hands the
+freed RAM to whoever asked. If the original owner touches an evicted page, the OS
+must fetch it back from disk — a **page fault**.
+
+Swap is disk pretending to be RAM. It works well when the bet behind it holds:
+*that the paged-out memory won't be needed again soon.*
+
+### Why this pipeline pushes RAM over the edge
+
+Several things are resident simultaneously:
+
+| Consumer | Roughly |
+|---|---|
+| `llama-server` holding the VLM weights | ~1.5–2.4 GB |
+| KV cache — 12,288 tokens per slot, min 16,384 total context | hundreds of MB |
+| The Python process: torch, marker, plus three smaller models (ocr-error, text detection, layout) | ~1–2 GB |
+| Page images rendered at 300 DPI by PyMuPDF | tens of MB, churning |
+| macOS, browser, editor | the rest |
+
+None of these is outrageous alone. Together, on a machine that was already near
+capacity with a nearly full disk, they exceed what is available.
+
+### Why it degrades instead of just being slower — the important part
+
+Most programs have **locality**: they touch a small working set repeatedly, so
+evicting the rest is nearly free. The OS's least-recently-used heuristic is built
+on that assumption.
+
+A transformer forward pass has **no locality at all**. Generating a single token
+sweeps the entire weight array start to finish. There is no "cold" region — every
+page is touched ~1,500 times per page of output. So whatever the OS evicts gets
+demanded back almost immediately, at disk speed instead of memory speed.
+
+That creates a feedback loop:
+
+1. Memory pressure → OS pages out part of the weights
+2. Next token needs those pages → page fault → disk read
+3. Tokens now take far longer → the process stays resident longer
+4. Pressure persists → more eviction → back to 1
+
+### The evidence from this run
+
+The numbers recorded during the local attempt show exactly this:
+
+| Observation | Value |
+|---|---|
+| Per-page rate, early chunks | 39.0 → 44.9 → 47.4 s/page |
+| Per-page rate, later | **164.4 s/page** |
+| Swap at rest | ~5 GB |
+| Swap during the run | **11.2 GB allocated, 9.9 GB used** |
+| Disk free, worst point | **909 MB** (from 6.9 GB) |
+| Disk after the process exited | recovered to 7.2 GB |
+
+The clearest single clue: `llama-server`'s resident size **fell** from 2,427 MB
+to 1,578 MB while it was still working. Its memory need had not shrunk — the OS
+had paged ~850 MB of it out to disk, memory it still required for every token.
+That gap is the slowdown.
+
+### Why swap eats disk too
+
+macOS grows swapfiles dynamically **on the boot volume**. So memory pressure
+consumes free disk: swap climbed to 11.2 GB while free space fell to 909 MB.
+When the process exits, the swapfiles are released and the space returns — which
+is why the disk recovered to 7.2 GB on its own each time the run was stopped.
+
+This is why `bt/transcribe.py` carries a disk guard (`MIN_FREE_GB = 2.0`) rather
+than a memory check: on this platform, running out of memory shows up first as
+running out of *disk*.
+
+### Why a GPU sidesteps the whole problem
+
+On a T4 the weights live in **16 GB of dedicated VRAM**. VRAM is not swapped —
+there is no "page out to disk" path for it. The model stays resident, every token
+reads it at full bandwidth, and the rate does not decay over a long run. That,
+more than raw speed, is why the Colab path exists: not just faster, but *stable*.
+
+### One-line summary
+
+Swap shows up because RAM is oversubscribed — and it is ruinous here rather than
+merely slow because an LLM has no memory locality, so every page the OS evicts is
+needed again within milliseconds.

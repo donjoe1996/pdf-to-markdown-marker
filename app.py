@@ -101,8 +101,30 @@ if pdf_path is None or not pdf_path.exists():
     st.stop()
 
 stat = pdf_path.stat()
-out_dir = OUTPUT_ROOT / pdf_path.stem
-st.sidebar.caption(f"{stat.st_size / 1e6:.1f} MB\n\nOutput: `output/{pdf_path.stem}/`")
+st.sidebar.caption(f"{stat.st_size / 1e6:.1f} MB")
+
+
+def chunks_in(folder: Path) -> int:
+    return len(list((folder / "chunks").glob("[0-9]*-[0-9]*.md")))
+
+
+# Where a run's chunks live decides whether it can resume. New runs get a
+# per-document folder, but earlier CLI runs wrote straight into output/, so look
+# there too -- otherwise finished work is invisible and the button says "Start"
+# when it should say "Resume".
+per_doc = OUTPUT_ROOT / pdf_path.stem
+default_out = next((c for c in (per_doc, OUTPUT_ROOT) if chunks_in(c)), per_doc)
+
+out_text = st.sidebar.text_input(
+    "Output folder",
+    value=str(default_out.relative_to(ROOT)),
+    help="Holds chunks/, raw.md and the final Markdown. Point it at an existing "
+    "folder to resume that run.",
+)
+out_dir = Path(out_text) if Path(out_text).is_absolute() else ROOT / out_text
+existing_chunks = chunks_in(out_dir)
+if existing_chunks:
+    st.sidebar.success(f"{existing_chunks} chunks already done here", icon=":material/history:")
 
 # A pipeline running anywhere on this machine matters, not just one we started.
 foreign = jobs.find_pipeline_processes()
@@ -168,7 +190,9 @@ if split and not info.is_spread:
 # 3. preview -- catch a wrong guess before a multi-hour run
 # --------------------------------------------------------------------------
 st.subheader("Preview")
-idx = st.slider("Page", 0, max(0, info.pages - 1), min(1, max(0, info.pages - 1)))
+# Default to the middle of the document: front matter is often blank or a
+# title page, which tells you nothing about whether the settings are right.
+idx = st.slider("Page", 0, max(0, info.pages - 1), max(0, info.pages // 2))
 if split:
     left, right, gutter, band = render_halves(str(pdf_path), idx, 110, stat.st_mtime)
     st.caption(f"Cut at {gutter:.1%} of width (blank band {band:.1%} wide)")
@@ -213,7 +237,15 @@ if job.running:
         jobs.stop(out_dir)
         st.rerun()
 else:
-    label = "Resume" if job.chunks_done else "Start"
+    if job.chunks_done:
+        total_chunks = -(-total_pages // int(chunk_size)) if chunk_size else 0
+        label = f"Resume ({job.chunks_done}/{total_chunks or '?'})"
+        st.caption(
+            f"{job.chunks_done} chunks are already transcribed in "
+            f"`{out_dir.name}/chunks/` and will be skipped."
+        )
+    else:
+        label = "Start"
     if b1.button(label, type="primary", disabled=bool(foreign)):
         try:
             jobs.start(spec)

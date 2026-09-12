@@ -2,6 +2,7 @@
 # itself is under copyright. Keep the pipeline in git, not its input or output.
 *.pdf
 output/
+uploads/
 
 # Environment
 .venv/

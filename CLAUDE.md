@@ -197,6 +197,15 @@ margin-strip OCR pass.
 pattern matches nothing, collapsing the book into one "page" and breaking
 per-page footnote namespacing.
 
+**Post-processing must re-emit page anchors.** `process()` writes
+`<!-- page N -->` where marker had `{N}----`. It renders as nothing, so a reader
+never sees it, but `verify.check_not_embedded_layer` aligns output pages to PDF
+pages by those numbers. An earlier version deleted them, which silently turned
+the most important check into a no-op: it reported "ok / no meaningful embedded
+text" for a whole 256-page book — a pass that proved nothing. Anchors also cost
+cross-page hyphen joins (6 in that book), since the anchor now sits between the
+split halves.
+
 **Footnote ids must be namespaced per page.** Footnote "1" recurs on nearly every
 page; un-namespaced ids would collide hundreds of times in one document.
 

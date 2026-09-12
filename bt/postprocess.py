@@ -25,6 +25,22 @@ from pathlib import Path
 # into one "page" (which breaks per-page footnote namespacing).
 PAGE_SEPARATOR = re.compile(r"^\{(\d+)\}-{10,}$", re.MULTILINE)
 
+# What post-processing writes in place of marker's separator. An HTML comment
+# renders as nothing, so the anchor is invisible to a reader while staying
+# machine-readable -- which keeps verify's page alignment working on the
+# finished document, and lets any passage be traced back to a page.
+#
+# Deleting the markers entirely, as an earlier version did, silently disabled
+# the most important check in verify.py: it reported "ok / no meaningful
+# embedded text" across a whole 256-page book, a pass that proved nothing.
+PAGE_ANCHOR_FMT = "<!-- page {n} -->"
+PAGE_ANCHOR = re.compile(r"^<!--\s*page\s+(\d+)\s*-->\s*$", re.MULTILINE)
+
+# Either form, so the same code reads marker's raw output and our own.
+PAGE_MARK = re.compile(
+    r"^(?:\{(\d+)\}-{10,}|<!--\s*page\s+(\d+)\s*-->)\s*$", re.MULTILINE
+)
+
 # Running heads are found by *repetition*, not by matching a known title. A head
 # like "82  Being and Time  I. 2" varies only in its numbers from page to page,
 # so normalising digits away makes it identical across the book -- whereas real
@@ -144,7 +160,7 @@ def split_pages(text: str) -> list[tuple[int, str]]:
     Uses marker's own page numbers rather than a running counter, so footnote
     ids stay stable when only part of the book is re-run.
     """
-    marks = list(PAGE_SEPARATOR.finditer(text))
+    marks = list(PAGE_MARK.finditer(text))
     if not marks:
         return [(0, text)]
 
@@ -154,7 +170,9 @@ def split_pages(text: str) -> list[tuple[int, str]]:
         pages.append((0, preamble))
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-        pages.append((int(m.group(1)), text[m.end() : end]))
+        # Whichever alternative matched: marker's "{N}----" or our own anchor.
+        number = m.group(1) or m.group(2)
+        pages.append((int(number), text[m.end() : end]))
     return pages
 
 
@@ -246,9 +264,16 @@ def process(
             page = convert_margin_numbers(page, stats)
         if footnotes:
             page = namespace_footnotes(page, page_no, stats)
-        done.append(page.strip())
+        done.append((page_no, page.strip()))
 
-    out = "\n\n".join(p for p in done if p)
+    # Re-emit the page number as an invisible anchor. Dropping it entirely is
+    # what broke verification on the finished document: without these, page
+    # alignment has nothing to align by.
+    out = "\n\n".join(
+        f"{PAGE_ANCHOR_FMT.format(n=page_no)}\n\n{body}"
+        for page_no, body in done
+        if body
+    )
     if hyphens:
         out = join_hyphens(out, stats)
     # Collapse the runs of blank lines left behind by removed lines.

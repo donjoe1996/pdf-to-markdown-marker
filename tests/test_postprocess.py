@@ -171,6 +171,20 @@ def test_golden_document(book_markdown, request):
     assert cleaned == golden.read_text(encoding="utf-8")
 
 
+def test_page_anchors_survive_post_processing(book_markdown):
+    """REGRESSION: post-processing deleted the page markers entirely.
+
+    Found on the first completed book. `raw.md` had 256 `{N}` separators and the
+    final `.md` had none, because process() split on them and rejoined without
+    putting anything back. That silently disabled the most important check in
+    verify.py, which aligns output pages against PDF pages by those numbers --
+    it reported "ok / no meaningful embedded text" for a whole book, a pass that
+    proved nothing.
+    """
+    cleaned, _ = process(book_markdown(6))
+    assert [n for n, _ in split_pages(cleaned)] == [0, 1, 2, 3, 4, 5]
+
+
 def test_margin_numbers_off_by_default(book_markdown):
     """marker discards marginal numbers, so the transform is a no-op here."""
     _, stats = process(book_markdown(4))

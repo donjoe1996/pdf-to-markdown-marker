@@ -136,6 +136,27 @@ def test_comparison_is_page_aligned(tmp_path):
     assert not check_not_embedded_layer(partial, pdf).ok
 
 
+def test_fresh_ocr_check_still_works_after_post_processing(tmp_path):
+    """REGRESSION: the check silently no-opped on the finished document.
+
+    It aligns output pages to PDF pages by the page markers, and post-processing
+    used to strip them. With none left it treated the whole book as one page,
+    compared against a near-empty cover, and reported ok -- for a text that was
+    byte-identical to the PDF's own layer and should have failed loudly.
+
+    Feeding it the embedded text is the control: if alignment survives
+    post-processing this must fail.
+    """
+    from bt.postprocess import process
+
+    pdf = pdf_with_text(tmp_path / "doc.pdf", [page_body(i) for i in range(6)])
+    cleaned, _ = process(marker_markdown(extracted(pdf)))
+
+    finding = check_not_embedded_layer(cleaned, pdf)
+    assert not finding.ok, "reused text must be caught in the final output too"
+    assert "identical" in finding.detail
+
+
 def test_run_all_skips_ocr_checks_for_extraction(tmp_path):
     """For a born-digital extract, matching the text layer is correct."""
     pdf = pdf_with_text(tmp_path / "doc.pdf", [page_body(i) for i in range(6)])

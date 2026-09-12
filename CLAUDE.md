@@ -36,6 +36,23 @@ uv run python -m bt.postprocess output/NAME/raw.md --report  # tune transforms, 
 (gutter detection) in about a minute with no models loaded. `bt.analyze` is
 faster still and answers the two questions that matter before a long run.
 
+## Skills — load these before working
+
+| Skill | Load it before |
+|---|---|
+| `adding-a-feature` | **any** new feature, module, behaviour change, refactor or bug fix |
+| `developing-with-streamlit` | editing `app.py` or anything Streamlit |
+
+`.claude/skills/adding-a-feature/SKILL.md` is the blueprint for how work is
+added here: check what is running first, find the seam, pin current behaviour,
+write the failing test before the fix, keep the suite fast and hermetic, and
+verify with `ruff` before `pytest`. Each step is there because skipping it has
+already cost time on this project.
+
+Load it **before** writing code, not after — several of its steps (checking for
+a running worker, pinning behaviour before changing it) are worthless once the
+edit is made.
+
 ## Tests
 
 ```bash

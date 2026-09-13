@@ -1,0 +1,14 @@
+# Keep the deployed image small and avoid baking in local run state.
+.git
+.github
+.claude
+tests
+colab
+output/
+uploads/
+*.pdf
+.venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+QnA.md

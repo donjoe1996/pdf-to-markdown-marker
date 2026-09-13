@@ -1,0 +1,40 @@
+name: deploy-to-hf-spaces
+
+# Mirrors this repo into a Hugging Face Space, whose own build infrastructure
+# then builds Dockerfile and (re)deploys it -- no Docker build happens here.
+# See the "Deploy your own copy" section in README.md for the one-time setup
+# this depends on: a free Space created once by hand, plus two repo settings
+# (HF_TOKEN secret, HF_SPACE_REPO variable) since only the Space's owner can
+# authorize pushes to it.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO: ${{ vars.HF_SPACE_REPO }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HF_TOKEN:-}" ] || [ -z "${HF_SPACE_REPO:-}" ]; then
+            echo "::error::Set the HF_TOKEN secret and HF_SPACE_REPO variable" \
+                 "(Settings -> Secrets and variables -> Actions) before this" \
+                 "workflow can deploy. See README.md 'Deploy your own copy'."
+            exit 1
+          fi
+          git remote add space "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE_REPO}"
+          # Force push is deliberate and expected here: a Space's git repo is a
+          # deployment mirror with no history worth preserving on its own, not
+          # a collaborative branch -- this is Hugging Face's own documented way
+          # to sync a Space from elsewhere. It never touches this GitHub repo.
+          git push --force space "HEAD:refs/heads/main"

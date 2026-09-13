@@ -1,7 +1,19 @@
+---
+title: PDF to Markdown OCR
+emoji: 📄
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Being and Time → Markdown
 
 Transcribes the scanned PDF of *Being and Time* (Macquarrie & Robinson) to
-Markdown using [datalab-to/marker](https://github.com/datalab-to/marker).
+Markdown using [datalab-to/marker](https://github.com/datalab-to/marker). The
+same pipeline generalises to other scanned or born-digital PDFs -- see
+"Deploy your own copy" below for a live, upload-a-PDF web version.
 
 ## Why this isn't just `marker_single file.pdf`
 
@@ -143,6 +155,40 @@ chunk files on disk. You can close the browser, restart the app, or reboot the
 GUI and the run is still there; **Resume** continues from the last finished
 chunk. The app also refuses to start while another pipeline is running
 anywhere on the machine — two at once push it into swap and slow both down.
+
+## Deploy your own copy (free, no server to manage)
+
+The GUI above is normally a local page. `Dockerfile` packages the same app
+plus a CPU build of `llama-server` (see the Traps section on why marker
+needs it) so it can run as a public web app on [Hugging Face
+Spaces](https://huggingface.co/spaces)' free CPU tier -- 16 GB RAM, enough for
+torch + surya + llama-server's ~2.4 GB working set, with no card required.
+
+**The real tradeoff of "free":** this repo was tuned around Apple Silicon's
+Metal-accelerated llama.cpp (82-95 s/page). The free tier has no GPU, so OCR
+runs noticeably slower there -- budget minutes per page, not seconds. A free
+Space also sleeps after a period of inactivity and cold-starts on the next
+visit. The models (~1.8 GB) are baked into the Docker image at build time
+specifically to keep that cold start to "container restart," not "download
+1.8 GB again." There is also no login: anyone with the link can use it and
+see whatever is uploaded, which is fine for a personal MVP but worth knowing.
+
+One-time setup (a Hugging Face account and a repository setting need a human
+with access to click them -- nothing here can do that for you):
+
+1. Create a free Space at <https://huggingface.co/new-space>: any name,
+   **Docker** as the SDK, **CPU basic** as hardware.
+2. Create a Hugging Face access token with **write** access
+   (<https://huggingface.co/settings/tokens>).
+3. In this GitHub repo's settings, add:
+   - **Secret** `HF_TOKEN` — the token from step 2.
+   - **Variable** `HF_SPACE_REPO` — `your-username/your-space-name` from step 1.
+
+From then on, `.github/workflows/deploy-hf-spaces.yml` pushes every update on
+`master` straight to the Space, which rebuilds the Docker image and
+redeploys it automatically -- no further manual steps. Trigger it by hand
+from the Actions tab (`workflow_dispatch`) to deploy before merging to
+`master`, or after adding the secrets for the first time.
 
 ## Keeping the machine busy — the queue worker
 

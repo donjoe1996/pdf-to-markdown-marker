@@ -36,6 +36,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--use-llm", action="store_true")
     ap.add_argument("--no-resume", action="store_true")
     ap.add_argument(
+        "--no-images",
+        action="store_true",
+        help="drop figures instead of extracting them to <out-dir>/images/ and "
+        "linking them from the Markdown",
+    )
+    ap.add_argument(
         "--no-split",
         action="store_true",
         help="treat each PDF page as one page. Use for any document that is NOT "
@@ -125,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
         use_llm=args.use_llm,
         resume=not args.no_resume,
         ocr=not args.no_ocr,
+        images=not args.no_images,
     )
 
     # -- Stage 3: cleanup -------------------------------------------------
@@ -140,7 +147,9 @@ def main(argv: list[str] | None = None) -> int:
     print("\n== Verification ==")
     from bt.verify import run_all
 
-    findings = run_all(cleaned)
+    # base_dir is the directory the finished Markdown will be read from, which
+    # is what makes the figure links checkable.
+    findings = run_all(cleaned, base_dir=final_md.parent)
     for f in findings:
         print(f"  [{'ok  ' if f.ok else 'FAIL'}] {f.name:<13} {f.detail}")
     return 0 if all(f.ok for f in findings) else 1

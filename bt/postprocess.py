@@ -19,6 +19,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bt.images import count_references
+
 # marker's paginated markdown marks each page as "{N}" followed by a rule,
 # e.g. "{3}------------------------------------------------" -- not a bare rule,
 # so a dashes-only pattern silently matches nothing and the whole book collapses
@@ -66,10 +68,21 @@ def _could_be_head(line: str) -> bool:
     sentence normalises to the same form on every page, and would otherwise be
     stripped as a head. A running head is a short *label*: it does not end in
     sentence punctuation and carries no footnote markup.
+
+    An image link is excluded outright, and that exclusion is load-bearing
+    rather than tidy. Head detection normalises digits away, so every
+    ``![](images/0000-0019_page_7_Picture_0.jpeg)`` collapses to the *same*
+    form; a book with a plate on a third of its pages would see every plate as
+    a running head and delete the lot -- and the result reads perfectly
+    cleanly, with the figures simply absent. A full-page figure also tends to
+    be the first or last line of its page, which is exactly where heads are
+    looked for.
     """
     s = line.strip().strip("*_# ")
     if not s or len(s) > HEAD_MAX_LEN:
         return False
+    if "![" in s:
+        return False  # a figure, not a head
     if s[-1] in ".,;:!?":
         return False  # a sentence, not a label
     if "<sup>" in s or re.search(r"\[\^", s):
@@ -122,6 +135,7 @@ class Stats:
     margins_converted: int = 0
     footnotes_namespaced: int = 0
     hyphens_joined: int = 0
+    images_linked: int = 0
     margin_sequence: list[int] = field(default_factory=list)
     head_forms: list[str] = field(default_factory=list)
 
@@ -136,6 +150,7 @@ class Stats:
             f"[H. n] anchors made  : {self.margins_converted}",
             f"footnotes namespaced : {self.footnotes_namespaced}",
             f"hyphen joins         : {self.hyphens_joined}",
+            f"figures linked       : {self.images_linked}",
         ]
         if self.head_forms:
             shown = ", ".join(repr(f) for f in self.head_forms[:4])
@@ -276,6 +291,10 @@ def process(
     )
     if hyphens:
         out = join_hyphens(out, stats)
+    # Counted rather than inferred, and always reported: a scan whose pages are
+    # noisy enough to be read as pictures shows up here as a figure count near
+    # the page count, which is the signal to re-run with --no-images.
+    stats.images_linked = count_references(out)
     # Collapse the runs of blank lines left behind by removed lines.
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out, stats

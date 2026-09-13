@@ -39,6 +39,8 @@ import shutil  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
 
+from bt.images import IMAGE_DIR_NAME, stage_chunk  # noqa: E402
+
 DEFAULT_CHUNK_SIZE = 20
 
 # llama-server's working set (~2.4 GB) drives heavy swap on a full volume, and
@@ -55,11 +57,18 @@ def build_config(
     dpi: int = 300,
     use_llm: bool = False,
     ocr: bool = True,
+    images: bool = True,
 ) -> dict:
     """Config dict for ``ConfigParser``.
 
     ``page_range`` is a *string* here because ConfigParser runs it through
     ``parse_range_str``; a hand-built config would need a list[int] instead.
+
+    ``images=False`` turns figure extraction off. It is on because a map or a
+    plate is part of the document, and marker will not hand the images back
+    later without re-running the OCR. The escape hatch exists because layout
+    detection can read a noisy scan's whole page as a picture; the figure count
+    in the post-processing report is what makes that visible.
 
     ``ocr=False`` is the born-digital fast path: marker reads the PDF's existing
     text layer instead of running the vision model, which turns hours into
@@ -70,7 +79,9 @@ def build_config(
         "output_format": "markdown",  # ConfigParser KeyErrors without this
         "highres_image_dpi": dpi,
         "paginate_output": True,  # keeps book pages addressable downstream
-        "disable_image_extraction": True,  # -> extract_images=False
+        # -> extract_images. Off means the figures are simply dropped: marker
+        # writes the caption and nothing else, so the loss is not obvious.
+        "disable_image_extraction": not images,
         "mode": mode,
     }
     if ocr:
@@ -110,12 +121,17 @@ def make_converter(config: dict, artifacts: dict):
     )
 
 
-def convert_range(converter, pdf_path: Path) -> str:
+def convert_range(converter, pdf_path: Path) -> tuple[str, dict]:
+    """Return the chunk's Markdown *and* the figures it refers to.
+
+    The images were discarded here before, which is why an illustrated book
+    came out with captions standing over nothing.
+    """
     from marker.output import text_from_rendered
 
     rendered = converter(str(pdf_path))
-    text, _ext, _images = text_from_rendered(rendered)
-    return text
+    text, _ext, images = text_from_rendered(rendered)
+    return text, images or {}
 
 
 def transcribe(
@@ -129,11 +145,18 @@ def transcribe(
     use_llm: bool = False,
     resume: bool = True,
     ocr: bool = True,
+    images: bool = True,
 ) -> Path:
     """OCR ``pdf_path`` in resumable chunks and concatenate to ``out_md``.
 
     A full run is measured in hours, so each chunk is written as it completes
     and an existing chunk file is skipped on re-run.
+
+    Extracted figures go to ``<out_md.parent>/images/`` and are linked relative
+    to the finished Markdown. They are saved *before* the chunk file is renamed
+    into place, because the chunk file is the record that its pages are done:
+    written the other way round, a kill in between would leave a resumed run
+    permanently missing those figures with nothing to notice it.
     """
     from marker.models import create_model_dict, shutdown_models
 
@@ -154,6 +177,7 @@ def transcribe(
     if not pending:
         return concatenate(chunk_dir, out_md, bounds)
 
+    image_dir = out_md.parent / IMAGE_DIR_NAME
     artifacts = create_model_dict()
     stopped_early = False
     try:
@@ -171,10 +195,17 @@ def transcribe(
             target = _chunk_path(chunk_dir, first, last)
             started = time.time()
             config = build_config(
-                f"{first}-{last}", mode=mode, dpi=dpi, use_llm=use_llm, ocr=ocr
+                f"{first}-{last}",
+                mode=mode,
+                dpi=dpi,
+                use_llm=use_llm,
+                ocr=ocr,
+                images=images,
             )
             converter = make_converter(config, artifacts)
-            text = convert_range(converter, pdf_path)
+            text, figures = convert_range(converter, pdf_path)
+            if figures:
+                text = stage_chunk(text, figures, image_dir, target.stem)
             # Write via a temp file and rename: a chunk killed mid-write would
             # otherwise look complete on resume and silently truncate the book.
             tmp = target.with_suffix(".partial")
@@ -182,9 +213,10 @@ def transcribe(
             tmp.replace(target)
             elapsed = time.time() - started
             pages = last - first + 1
+            figure_note = f", {len(figures)} figures" if figures else ""
             print(
                 f"  [{n}/{len(pending)}] pages {first}-{last} -> {target.name} "
-                f"({elapsed:.0f}s, {elapsed / pages:.1f}s/page)"
+                f"({elapsed:.0f}s, {elapsed / pages:.1f}s/page{figure_note})"
             )
     finally:
         shutdown_models(artifacts)
@@ -253,6 +285,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--use-llm", action="store_true", help="enable LLM hybrid mode")
     ap.add_argument("--no-resume", action="store_true", help="redo completed chunks")
     ap.add_argument(
+        "--no-images",
+        action="store_true",
+        help="drop figures instead of saving them next to the Markdown",
+    )
+    ap.add_argument(
         "--no-ocr",
         action="store_true",
         help="read the existing text layer instead of OCRing (born-digital PDFs "
@@ -275,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
         use_llm=args.use_llm,
         resume=not args.no_resume,
         ocr=not args.no_ocr,
+        images=not args.no_images,
     )
     return 0
 

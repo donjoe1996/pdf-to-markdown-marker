@@ -317,7 +317,7 @@ with st.expander("Why these settings", expanded=True):
 # 2. settings (pre-filled from the analysis, still editable)
 # --------------------------------------------------------------------------
 st.subheader("Settings")
-s1, s2, s3 = st.columns(3)
+s1, s2, s3, s4 = st.columns(4)
 split = s1.checkbox(
     "Split two-page spreads",
     value=info.recommend_split,
@@ -330,7 +330,14 @@ ocr = s2.checkbox(
     help="Off reads the PDF's existing text layer instead — seconds rather than "
     "hours, but only right when that layer is trustworthy.",
 )
-dpi = s3.select_slider("DPI", [150, 192, 300, 400], value=300,
+figures = s3.checkbox(
+    "Extract figures",
+    value=True,
+    help="Saves maps, plates and diagrams to the output folder and links them "
+    "from the Markdown. Turn off if layout detection reads whole scanned "
+    "pages as pictures.",
+)
+dpi = s4.select_slider("DPI", [150, 192, 300, 400], value=300,
                        help="Does not change speed — the cost is tokens generated, not pixels read.")
 a1, a2 = st.columns(2)
 chunk_size = a1.number_input("Pages per chunk", 1, 100, 10,
@@ -392,6 +399,7 @@ spec = jobs.JobSpec(
     out_dir=str(out_dir),
     split=split,
     ocr=ocr,
+    images=figures,
     dpi=int(dpi),
     chunk_size=int(chunk_size),
     pages=pages.strip() or None,

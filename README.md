@@ -101,11 +101,21 @@ Output lands in `output/<pdf-stem>/`:
 | `pages.pdf` | the split single-page PDF |
 | `pagemap.json` | `output page → (source page, half)`, for tracing problems back |
 | `chunks/` | per-chunk Markdown; **re-running skips completed chunks** |
+| `images/` | figures marker pulled out of the pages, linked from the Markdown |
 | `raw.md` | concatenated marker output |
 | `being-and-time.md` | final cleaned Markdown |
 
 A full run takes hours. It is chunked and resumable — interrupt it and re-run
 the same command to pick up where it stopped.
+
+**Figures.** Maps, plates and diagrams are extracted to `images/` and linked
+from the Markdown as `![](images/...)`, so the finished `.md` shows them where
+they sat on the page — Wallace's map of the fire belt appears in the text, not
+just its caption. The links are relative, so keep `images/` beside the `.md`
+when moving the output; `verify.py` reports any link with no file behind it.
+Turn extraction off with `--no-images` if layout detection starts reading whole
+scanned pages as pictures — the "figures linked" count in the post-processing
+report is the tell, when it climbs towards the page count.
 
 ### Useful flags
 
@@ -119,6 +129,7 @@ the same command to pick up where it stopped.
 | `--no-ocr` | read the existing text layer instead of OCRing |
 | `--use-llm` | LLM hybrid mode — mainly helps the polytonic Greek. Needs a key; see marker's docs |
 | `--no-resume` | redo chunks that already exist |
+| `--no-images` | drop figures instead of extracting them (see below) |
 
 ## Web GUI
 

@@ -189,3 +189,29 @@ def test_margin_numbers_off_by_default(book_markdown):
     """marker discards marginal numbers, so the transform is a no-op here."""
     _, stats = process(book_markdown(4))
     assert stats.margins_converted == 0
+
+
+# --------------------------------------------------------------------------
+# images
+# --------------------------------------------------------------------------
+def test_image_line_is_not_stripped_as_a_running_head():
+    """A plate on every page must survive head removal.
+
+    Running heads are found by normalising digits away and counting
+    repetitions, and an image reference collapses to the *same* normalised form
+    on every page ("![](images/#-#-_page_#_Picture_#.jpeg)"). A full-page plate
+    is also typically the first or last line of its page, which is exactly
+    where heads are looked for -- so without a shape guard, a book of plates
+    loses every one of its images and still looks perfectly clean.
+    """
+    pages = [
+        f"![](images/0000-0019-_page_{i}_Picture_0.jpeg)\n\n"
+        f"Body text unique to page {i}, long enough to read as a sentence."
+        for i in range(10)
+    ]
+    text = marker_markdown(pages)
+
+    out, stats = process(text)
+
+    assert out.count("![](images/") == 10, "image references were eaten as heads"
+    assert stats.images_linked == 10

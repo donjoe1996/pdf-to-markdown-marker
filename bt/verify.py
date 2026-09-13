@@ -155,12 +155,47 @@ def check_footnotes(text: str, required: bool = False) -> Finding:
     return Finding("footnotes", True, f"{n} footnote markers")
 
 
+def check_images(text: str, base_dir) -> Finding:
+    """Every figure the Markdown links to must exist on disk.
+
+    The same chunk writes the link and the file, so a missing one means
+    something dropped it between here and there. A dead image link is invisible
+    in the Markdown source and glaring to a reader, which makes it worth a
+    check rather than a hope. Relative links only: an http(s) figure is not
+    ours to account for.
+    """
+    from bt.images import MD_IMAGE
+
+    base = Path(base_dir)
+    links = [
+        target
+        for _alt, target in MD_IMAGE.findall(text)
+        if not target.startswith(("http://", "https://", "data:"))
+    ]
+    if not links:
+        return Finding("figures", True, "no figures linked")
+
+    missing = [t for t in dict.fromkeys(links) if not (base / t).exists()]
+    if missing:
+        shown = ", ".join(missing[:3])
+        return Finding(
+            "figures",
+            False,
+            f"{len(missing)} of {len(links)} linked figures are not on disk "
+            f"(e.g. {shown}) -- the Markdown points at files that were never "
+            "written, or the images directory was left behind when the book "
+            "was copied",
+        )
+    return Finding("figures", True, f"{len(links)} figures linked, all present")
+
+
 def run_all(
     text: str,
     pdf_path=None,
     markers: list[str] | None = None,
     expect: tuple[str, ...] = (),
     fresh_ocr: bool = True,
+    base_dir=None,
 ) -> list[Finding]:
     """Check transcribed Markdown.
 
@@ -170,6 +205,8 @@ def run_all(
     ("greek", "italics", "footnotes") -- anything unnamed is reported but
     cannot fail. ``fresh_ocr=False`` skips the OCR checks entirely, since for a
     born-digital extraction matching the embedded layer is correct.
+    ``base_dir`` is the directory the Markdown will be read from; giving it
+    enables the check that extracted figures are actually there.
     """
     findings: list[Finding] = []
     if fresh_ocr:
@@ -181,6 +218,8 @@ def run_all(
     findings.append(check_greek(text, "greek" in expect))
     findings.append(check_italics(text, "italics" in expect))
     findings.append(check_footnotes(text, "footnotes" in expect))
+    if base_dir is not None:
+        findings.append(check_images(text, base_dir))
     return findings
 
 
@@ -193,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
 
     text = args.md.read_text(encoding="utf-8")
     print(f"Checking {args.md} ({len(text):,} chars)\n")
-    findings = run_all(text)
+    findings = run_all(text, base_dir=args.md.parent)
     for f in findings:
         print(f"  [{'ok  ' if f.ok else 'FAIL'}] {f.name:<13} {f.detail}")
 

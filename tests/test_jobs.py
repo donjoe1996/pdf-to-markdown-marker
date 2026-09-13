@@ -71,6 +71,15 @@ def test_jobspec_flags_are_opt_out():
     assert "--no-split" in off and "--no-ocr" in off
 
 
+def test_jobspec_keeps_figure_extraction_unless_it_is_turned_off():
+    """Figures are part of the document; leaving them out is the exception."""
+    on = " ".join(JobSpec(pdf="a.pdf", out_dir="o").command())
+    assert "--no-images" not in on
+
+    off = " ".join(JobSpec(pdf="a.pdf", out_dir="o", images=False).command())
+    assert "--no-images" in off
+
+
 # --------------------------------------------------------------------------
 # liveness
 # --------------------------------------------------------------------------

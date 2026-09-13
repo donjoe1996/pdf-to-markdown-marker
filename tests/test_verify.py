@@ -14,6 +14,7 @@ import pymupdf
 from bt.verify import (
     check_footnotes,
     check_greek,
+    check_images,
     check_italics,
     check_not_embedded_layer,
     check_run_ons,
@@ -165,3 +166,46 @@ def test_run_all_skips_ocr_checks_for_extraction(tmp_path):
     names = {f.name for f in run_all(text, pdf_path=pdf, fresh_ocr=False)}
     assert "fresh OCR" not in names
     assert all(f.ok for f in run_all(text, pdf_path=pdf, fresh_ocr=False))
+
+
+# --------------------------------------------------------------------------
+# figures
+# --------------------------------------------------------------------------
+def test_image_check_reports_a_link_with_no_file_behind_it(tmp_path):
+    """A dead image link is invisible in a text editor and obvious to a reader.
+
+    The chunk that wrote the markdown and the chunk that wrote the file are the
+    same, so a missing file means something dropped it -- a half-copied output
+    directory, or a rewrite that got the path wrong. Either way the book is
+    quietly incomplete, which is the failure class this project cares about.
+    """
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "0000-0009_page_1_Picture_0.jpeg").write_bytes(b"x")
+    text = (
+        "![](images/0000-0009_page_1_Picture_0.jpeg)\n\n"
+        "![](images/0000-0009_page_2_Picture_0.jpeg)\n"
+    )
+
+    finding = check_images(text, tmp_path)
+    assert not finding.ok
+    assert "0000-0009_page_2_Picture_0.jpeg" in finding.detail
+
+
+def test_image_check_passes_when_every_figure_is_on_disk(tmp_path):
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "a.jpeg").write_bytes(b"x")
+
+    finding = check_images("![](images/a.jpeg)", tmp_path)
+    assert finding.ok
+    assert "1" in finding.detail
+
+
+def test_image_check_is_silent_for_a_book_with_no_figures(tmp_path):
+    """Most documents have none; that is not a fault."""
+    assert check_images("just text", tmp_path).ok
+
+
+def test_run_all_includes_the_image_check_only_when_given_a_directory(tmp_path):
+    text = "![](images/gone.jpeg)"
+    assert "images" not in {f.name for f in run_all(text)}
+    assert not all(f.ok for f in run_all(text, base_dir=tmp_path))

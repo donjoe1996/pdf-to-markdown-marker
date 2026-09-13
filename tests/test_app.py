@@ -103,3 +103,16 @@ def test_switching_document_does_not_raise(app):
         pytest.skip("no PDFs available to select")
     app.selectbox[0].set_value(pdfs[0]).run()
     assert not app.exception, [str(e.value) for e in app.exception]
+
+
+def test_figure_extraction_is_offered_and_on_by_default(app):
+    """The GUI must be able to say what the CLI can say.
+
+    A setting that exists only as a command-line flag is a setting the GUI
+    quietly overrides -- and figures are on by default, so the box has to
+    agree with that.
+    """
+    if not has_documents(app):
+        pytest.skip("no documents; settings are only rendered for a document")
+    boxes = {c.label: c.value for c in app.checkbox}
+    assert boxes.get("Extract figures") is True

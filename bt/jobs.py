@@ -37,6 +37,7 @@ class JobSpec:
     out_dir: str
     split: bool = True
     ocr: bool = True
+    images: bool = True
     dpi: int = 300
     chunk_size: int = 10
     mode: str = "fast"
@@ -57,6 +58,8 @@ class JobSpec:
             cmd.append("--no-split")
         if not self.ocr:
             cmd.append("--no-ocr")
+        if not self.images:
+            cmd.append("--no-images")
         if self.pages:
             cmd += ["--pages", self.pages]
         return cmd

@@ -28,6 +28,7 @@ uv run bt-transcribe --pdf FILE.pdf --split-only    # stage 1 only; no models ne
 uv run bt-transcribe --pdf FILE.pdf --no-split --no-ocr   # single pages, text-layer extract
 uv run python -m bt.verify output/NAME/NAME.md
 uv run python -m bt.postprocess output/NAME/raw.md --report  # tune transforms, write nothing
+uv run bt-transcribe --pdf FILE.pdf --no-images      # drop figures instead of extracting them
 ```
 
 **`--pdf` is required** — there is no default document any more.
@@ -57,7 +58,7 @@ edit is made.
 
 ```bash
 uv run ruff check .          # layer 0: undefined names, unused imports (~1s)
-uv run pytest                # fast suite, ~1s, 79 tests
+uv run pytest                # fast suite, ~1s, 122 tests
 uv run pytest -m slow        # Streamlit smoke tests (boot the app; ~1 min locally)
 uv run pytest -m ""          # everything, as CI runs it
 uv run pytest --golden-update   # rewrite golden files -- review the diff
@@ -133,6 +134,7 @@ at.selectbox[0].set_value("meditationsofmar00marc.pdf").run()
 | 2a | `warmup.py` | Pre-download every model before any timed spawn |
 | 2b | `transcribe.py` | Chunked, resumable OCR via marker |
 | 3 | `postprocess.py` | Strip heads, namespace footnotes, dehyphenate |
+| — | `images.py` | Save marker's extracted figures, repoint the links at them |
 | — | `verify.py` | Quality checks on the finished Markdown |
 
 `transcribe.py` and `warmup.py` set env vars **at import time, before torch is
@@ -208,6 +210,26 @@ split halves.
 
 **Footnote ids must be namespaced per page.** Footnote "1" recurs on nearly every
 page; un-namespaced ids would collide hundreds of times in one document.
+
+**Figure filenames must be namespaced per chunk.** marker names extracted
+images from its own page ids (`_page_3_Picture_0.jpeg`), and a run converts the
+document in a dozen separate chunks. If those ids ever restart per conversion,
+chunk two's `_page_0_Picture_0.jpeg` overwrites chunk one's and the book shows
+the right caption over the wrong plate. `images.save_chunk_images()` prefixes
+every file with the chunk's page range, so this is impossible either way rather
+than dependent on a marker internal.
+
+**An image link looks exactly like a running head.** Head detection normalises
+digits away, so every `![](images/0000-0019_page_7_Picture_0.jpeg)` collapses to
+the same form, and a full-page plate is usually the first or last line of its
+page — precisely where heads are looked for. A book with plates on >30% of its
+pages therefore lost every one of them, cleanly and invisibly. `_could_be_head()`
+now rejects any line containing `![`.
+
+**Figures are written before the chunk that references them.** The chunk `.md`
+is the record that its pages are done, so a kill between the two writes would
+leave a resumed run permanently missing those figures with nothing to notice
+it.
 
 **Chunk writes are atomic (temp file + rename).** A chunk killed mid-write would
 otherwise look complete on resume and silently truncate the book.
@@ -331,5 +353,13 @@ the embedded layer's distinctive damage. **Any hit means marker reused the bad
 Acrobat text instead of OCRing** — readable Markdown made of the wrong
 characters. Always run it after changing OCR config.
 
+`verify.check_images()` resolves every `![](images/...)` link against the
+directory the Markdown will be read from. A dead link is invisible in the source
+and glaring to a reader, and the same chunk writes both the link and the file,
+so a miss means something dropped it.
+
 Expected on a healthy run: no stale-layer artefacts, 0 run-on words, Greek runs
-found, italic spans found, footnote markers found.
+found, italic spans found, footnote markers found, every linked figure present.
+
+A "figures linked" count approaching the page count means layout detection is
+reading whole scanned pages as pictures; re-run with `--no-images`.

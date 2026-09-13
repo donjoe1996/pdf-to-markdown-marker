@@ -10,13 +10,14 @@ run. See bt/jobs.py for why that matters.
 
 from __future__ import annotations
 
+import os
 import shlex
 from pathlib import Path
 
 import pymupdf
 import streamlit as st
 
-from bt import jobs
+from bt import auth, jobs
 from bt import queue as bt_queue
 from bt.analyze import analyze
 from bt.split_spreads import _ink_profile, find_gutter
@@ -24,7 +25,91 @@ from bt.split_spreads import _ink_profile, find_gutter
 ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = ROOT / "output"
 
+# Set only in the Docker image this repo ships for Hugging Face Spaces (see
+# Dockerfile / README "Deploy your own copy"). Local, personal use of this
+# app -- the normal case documented in CLAUDE.md -- never sets it and gets
+# none of the login/quota gate below: one trusted user, one machine, no need
+# for accounts.
+PUBLIC_MODE = os.environ.get("BT_PUBLIC_MODE") == "1"
+
 st.set_page_config(page_title="PDF → Markdown", page_icon="📄", layout="wide")
+
+
+def _require_login() -> str:
+    """Render the login/signup/forgot-code screen; return the signed-in username.
+
+    Only called in PUBLIC_MODE. Not real authentication -- see bt/auth.py's
+    module docstring for exactly what this protects (per-visitor storage and
+    a page cap on a shared free container) and what it does not (identity).
+    """
+    user = st.session_state.get("user")
+    if user:
+        return user
+
+    st.title("📄 PDF → Markdown")
+    st.caption(
+        "Free demo on a shared CPU server. No real accounts -- this just "
+        "keeps your files separate from everyone else's and caps each "
+        f"document at {auth.MAX_PAGES_PER_DOCUMENT} pages."
+    )
+    tab_signup, tab_login, tab_forgot = st.tabs(["New here", "Log in", "Forgot your code"])
+
+    with tab_signup:
+        with st.form("signup"):
+            new_username = st.text_input("Choose a username")
+            new_email = st.text_input("Email (not verified — only used to recover your code)")
+            if st.form_submit_button("Create account", type="primary"):
+                try:
+                    code = auth.signup(new_username, new_email)
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.success(
+                        f"Your one-time login code is **{code}**. It is shown "
+                        "only here, once — save it now. You'll need your "
+                        "username and this code to come back.",
+                        icon=":material/key:",
+                    )
+
+    with tab_login:
+        with st.form("login"):
+            username = st.text_input("Username", key="login_username")
+            code = st.text_input("Login code", key="login_code")
+            if st.form_submit_button("Log in", type="primary"):
+                if auth.login(username, code):
+                    st.session_state["user"] = auth.normalize_username(username)
+                    st.rerun()
+                else:
+                    st.error("Wrong username or code.")
+
+    with tab_forgot:
+        st.caption(
+            "No email is sent — if your username and email match, a new code "
+            "is shown right here and your old code stops working."
+        )
+        with st.form("forgot"):
+            forgot_username = st.text_input("Username", key="forgot_username")
+            forgot_email = st.text_input("Email you signed up with", key="forgot_email")
+            if st.form_submit_button("Get a new code"):
+                new_code = auth.reset_code(forgot_username, forgot_email)
+                if new_code:
+                    st.success(f"Your new login code is **{new_code}**.", icon=":material/key:")
+                else:
+                    st.error("No account matches that username and email.")
+
+    st.stop()
+
+
+if PUBLIC_MODE:
+    current_user = _require_login()
+    with st.sidebar:
+        who = st.container(horizontal=True, vertical_alignment="center")
+        who.caption(f"Signed in as **{current_user}**")
+        if who.button("Log out", icon=":material/logout:"):
+            del st.session_state["user"]
+            st.rerun()
+else:
+    current_user = None
 
 
 # --------------------------------------------------------------------------
@@ -71,14 +156,17 @@ def human_time(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-def find_pdfs() -> list[Path]:
-    """PDFs in the project root and in uploads/.
+def find_pdfs(dirs: list[Path] | None = None) -> list[Path]:
+    """PDFs in the given directories (default: the project root and uploads/).
 
-    Uploaded files are saved to uploads/ so they survive a reload -- without
+    Uploaded files are saved to disk so they survive a reload -- without
     listing that folder they would disappear from the picker as soon as the
-    uploader widget cleared, stranding work already done on them.
+    uploader widget cleared, stranding work already done on them. In
+    PUBLIC_MODE the caller passes just the current user's own upload folder,
+    so one visitor never sees another's filenames.
     """
-    found = list(ROOT.glob("*.pdf")) + list((ROOT / "uploads").glob("*.pdf"))
+    search = dirs if dirs is not None else [ROOT, ROOT / "uploads"]
+    found = [p for d in search for p in d.glob("*.pdf")]
     return sorted(
         (p for p in found if not p.name.startswith(".")), key=lambda p: p.name.lower()
     )
@@ -89,7 +177,8 @@ def find_pdfs() -> list[Path]:
 # --------------------------------------------------------------------------
 st.sidebar.title("📄 PDF → Markdown")
 
-pdfs = find_pdfs()
+user_upload_dir = auth.account_dir(current_user) if PUBLIC_MODE else ROOT / "uploads"
+pdfs = find_pdfs([user_upload_dir]) if PUBLIC_MODE else find_pdfs()
 # Label by path relative to the project, not bare filename: uploads/ files live
 # in a subfolder, and resolving a bare name against the root would miss them.
 by_label = {str(p.relative_to(ROOT)): p for p in pdfs}
@@ -100,7 +189,7 @@ pdf_path: Path | None = None
 if choice == "Upload a file…":
     up = st.sidebar.file_uploader("Choose a PDF", type="pdf")
     if up is not None:
-        dest = ROOT / "uploads" / up.name
+        dest = user_upload_dir / up.name
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists() or dest.stat().st_size != up.size:
             dest.write_bytes(up.getbuffer())
@@ -116,28 +205,38 @@ stat = pdf_path.stat()
 st.sidebar.caption(f"{stat.st_size / 1e6:.1f} MB")
 
 
-# Resolving this in bt.queue keeps the GUI and the worker agreeing on where a
-# document's chunks live. If they disagreed, one could resume onto the other's
-# output -- see queue.folder_belongs_to for why ownership comes from the lock.
-default_out = bt_queue.resolve_out_dir(pdf_path)
 chunks_in = bt_queue.chunks_in
 
-# Shown relative to the project when it lives there, which is the normal case
-# and much easier to read. An output folder elsewhere is shown in full rather
-# than raising -- relative_to() is strict, and an unhandled ValueError here
-# takes down the whole page.
-try:
-    default_label = str(default_out.relative_to(ROOT))
-except ValueError:
-    default_label = str(default_out)
+if PUBLIC_MODE:
+    # Fixed and namespaced by account, not user-editable: a free-text output
+    # folder would let one visitor point at (and read) another's in-progress
+    # or finished work by guessing their folder name.
+    out_dir = OUTPUT_ROOT / current_user / pdf_path.stem
+    st.sidebar.caption(f"Output: `{out_dir.relative_to(ROOT)}`")
+else:
+    # Resolving this in bt.queue keeps the GUI and the worker agreeing on
+    # where a document's chunks live. If they disagreed, one could resume
+    # onto the other's output -- see queue.folder_belongs_to for why
+    # ownership comes from the lock.
+    default_out = bt_queue.resolve_out_dir(pdf_path)
 
-out_text = st.sidebar.text_input(
-    "Output folder",
-    value=default_label,
-    help="Holds chunks/, raw.md and the final Markdown. Point it at an existing "
-    "folder to resume that run.",
-)
-out_dir = Path(out_text) if Path(out_text).is_absolute() else ROOT / out_text
+    # Shown relative to the project when it lives there, which is the normal
+    # case and much easier to read. An output folder elsewhere is shown in
+    # full rather than raising -- relative_to() is strict, and an unhandled
+    # ValueError here takes down the whole page.
+    try:
+        default_label = str(default_out.relative_to(ROOT))
+    except ValueError:
+        default_label = str(default_out)
+
+    out_text = st.sidebar.text_input(
+        "Output folder",
+        value=default_label,
+        help="Holds chunks/, raw.md and the final Markdown. Point it at an existing "
+        "folder to resume that run.",
+    )
+    out_dir = Path(out_text) if Path(out_text).is_absolute() else ROOT / out_text
+
 existing_chunks = chunks_in(out_dir)
 if existing_chunks:
     st.sidebar.success(f"{existing_chunks} chunks already done here", icon=":material/history:")
@@ -155,10 +254,17 @@ if runs:
         for run in runs:
             row = st.container(horizontal=True, vertical_alignment="center")
             same_doc = str(pdf_path) == run.pdf
+            # In PUBLIC_MODE, a filename identifies a stranger's document --
+            # show it only for the account it belongs to.
+            run_is_others = PUBLIC_MODE and not same_doc and not str(
+                Path(run.pdf)
+            ).startswith(str(user_upload_dir))
+            name = "another user's document" if run_is_others else run.name
             row.markdown(
-                f":material/sync: **{run.name}**"
+                f":material/sync: **{name}**"
                 f"{'  ·  _this document_' if same_doc else ''}  \n"
-                f"{run.chunks_done} chunks done · `{Path(run.out_dir).name or 'output'}/`"
+                f"{run.chunks_done} chunks done"
+                + ("" if run_is_others else f" · `{Path(run.out_dir).name or 'output'}/`")
             )
             if row.button(
                 "Stop this job",
@@ -177,126 +283,140 @@ if runs:
 # --------------------------------------------------------------------------
 # queue: what the worker will do next, unattended
 # --------------------------------------------------------------------------
-st.subheader("Queue")
+# Not shown in PUBLIC_MODE: it lists and can start unattended processing of
+# every user's uploads at once, on hardware sized for one job at a time, and
+# an unattended worker run has no way to apply the per-account page cap.
+if not PUBLIC_MODE:
+    st.subheader("Queue")
 
-worker = jobs.worker_pid()
-if worker:
-    st.success(
-        f"Worker running (pid {worker}). When a book finishes or stops, the "
-        "next one starts on its own.",
-        icon=":material/autoplay:",
-    )
-else:
-    st.warning(
-        "No worker running — books will not advance on their own.",
-        icon=":material/pause_circle:",
-    )
+    worker = jobs.worker_pid()
+    if worker:
+        st.success(
+            f"Worker running (pid {worker}). When a book finishes or stops, the "
+            "next one starts on its own.",
+            icon=":material/autoplay:",
+        )
+    else:
+        st.warning(
+            "No worker running — books will not advance on their own.",
+            icon=":material/pause_circle:",
+        )
 
-# The worker is detached, so the button only sends a command; the page state
-# still comes from disk. The command is echoed so a click is never a mystery.
-try:
-    worker_log = str(jobs.worker_log_path().relative_to(ROOT))
-except ValueError:
-    worker_log = str(jobs.worker_log_path())
-start_preview = shlex.join(jobs.worker_command()) + f" >> {worker_log} 2>&1 &"
+    # The worker is detached, so the button only sends a command; the page
+    # state still comes from disk. The command is echoed so a click is never
+    # a mystery.
+    try:
+        worker_log = str(jobs.worker_log_path().relative_to(ROOT))
+    except ValueError:
+        worker_log = str(jobs.worker_log_path())
+    start_preview = shlex.join(jobs.worker_command()) + f" >> {worker_log} 2>&1 &"
 
-worker_row = st.container(horizontal=True, vertical_alignment="center")
-if worker:
-    # Stopping the worker alone leaves its current job (and llama-server's
-    # ~2.5 GB) running, which is rarely what "stop" is for.
-    also_job = bool(runs) and worker_row.checkbox(
-        "Also stop the running job",
-        value=True,
-        help="Frees the job's memory, llama-server included. Finished chunks are kept.",
-    )
-    if worker_row.button("Stop worker", icon=":material/stop_circle:"):
-        executed = [shlex.join(jobs.stop_worker() or ["# worker had already exited"])]
-        if also_job:
-            for run in runs:
-                jobs.stop_pids(run.pids)
-                executed.append(shlex.join(["kill", "-TERM", *map(str, run.pids)]))
-            executed.append("pkill -f llama-server")
-        st.session_state["worker_cmd"] = "\n".join(executed)
-        st.toast("Worker stopped", icon=":material/stop_circle:")
-        st.rerun()
-else:
-    if worker_row.button("Start worker", type="primary", icon=":material/play_circle:"):
-        try:
-            jobs.start_worker()
-            st.session_state["worker_cmd"] = f"cd {shlex.quote(str(ROOT))}\n{start_preview}"
-            st.toast("Worker started", icon=":material/play_circle:")
+    worker_row = st.container(horizontal=True, vertical_alignment="center")
+    if worker:
+        # Stopping the worker alone leaves its current job (and llama-server's
+        # ~2.5 GB) running, which is rarely what "stop" is for.
+        also_job = bool(runs) and worker_row.checkbox(
+            "Also stop the running job",
+            value=True,
+            help="Frees the job's memory, llama-server included. Finished chunks are kept.",
+        )
+        if worker_row.button("Stop worker", icon=":material/stop_circle:"):
+            executed = [shlex.join(jobs.stop_worker() or ["# worker had already exited"])]
+            if also_job:
+                for run in runs:
+                    jobs.stop_pids(run.pids)
+                    executed.append(shlex.join(["kill", "-TERM", *map(str, run.pids)]))
+                executed.append("pkill -f llama-server")
+            st.session_state["worker_cmd"] = "\n".join(executed)
+            st.toast("Worker stopped", icon=":material/stop_circle:")
             st.rerun()
-        except RuntimeError as exc:
-            st.error(str(exc), icon=":material/error:")
+    else:
+        if worker_row.button("Start worker", type="primary", icon=":material/play_circle:"):
+            try:
+                jobs.start_worker()
+                st.session_state["worker_cmd"] = f"cd {shlex.quote(str(ROOT))}\n{start_preview}"
+                st.toast("Worker started", icon=":material/play_circle:")
+                st.rerun()
+            except RuntimeError as exc:
+                st.error(str(exc), icon=":material/error:")
 
-if "worker_cmd" in st.session_state:
-    st.caption("Last command run from this page")
-    st.code(st.session_state["worker_cmd"], language="bash")
-elif worker:
-    stop_preview = [f"kill -TERM {worker}"]
-    if also_job:
-        stop_preview += [shlex.join(["kill", "-TERM", *map(str, r.pids)]) for r in runs]
-        stop_preview.append("pkill -f llama-server")
-    st.caption("Stop runs")
-    st.code("\n".join(stop_preview), language="bash")
-else:
-    st.caption(f"Start runs (output goes to `{worker_log}`)")
-    st.code(start_preview, language="bash")
+    if "worker_cmd" in st.session_state:
+        st.caption("Last command run from this page")
+        st.code(st.session_state["worker_cmd"], language="bash")
+    elif worker:
+        stop_preview = [f"kill -TERM {worker}"]
+        if also_job:
+            stop_preview += [shlex.join(["kill", "-TERM", *map(str, r.pids)]) for r in runs]
+            stop_preview.append("pkill -f llama-server")
+        st.caption("Stop runs")
+        st.code("\n".join(stop_preview), language="bash")
+    else:
+        st.caption(f"Start runs (output goes to `{worker_log}`)")
+        st.code(start_preview, language="bash")
 
-queue_states = bt_queue.survey()
-rows = [
-    {
-        "Document": s.key,
-        "Status": s.status,
-        "Progress": s.fraction,
-        "Chunks": f"{s.chunks_done}/{s.chunks_total}" if s.chunks_total else "—",
-        "Skip": s.skip,
-    }
-    for s in queue_states
-]
-edited = st.data_editor(
-    rows,
-    hide_index=True,
-    width="stretch",
-    disabled=["Document", "Status", "Progress", "Chunks"],
-    column_config={
-        "Progress": st.column_config.ProgressColumn(
-            "Progress", min_value=0.0, max_value=1.0, format="%.0f%%"
-        ),
-        "Skip": st.column_config.CheckboxColumn(
-            "Skip", help="Leave this document out of the queue"
-        ),
-    },
-    key="queue_editor",
-)
-
-# Persist only what changed; writing every row on every rerun would churn the
-# file and fight the user's next click.
-# strict=True deliberately: these must stay aligned row for row. If they ever
-# diverged, a Skip toggle would be written to the wrong document.
-for original, row in zip(queue_states, edited, strict=True):
-    if bool(row.get("Skip")) != original.skip:
-        bt_queue.set_skip(original.key, bool(row.get("Skip")))
-
-nxt = bt_queue.next_pending()
-stalled = [s for s in queue_states if s.status == "stalled"]
-st.caption(
-    f"Next up: **{nxt.key}**" if nxt else "Nothing pending — every document is done or skipped."
-)
-if stalled:
-    st.warning(
-        "Stopped making progress after repeated attempts: "
-        + ", ".join(s.key for s in stalled)
-        + ". The worker has moved on; clear the attempt count by unskipping or "
-        "investigate that document.",
-        icon=":material/error:",
+    queue_states = bt_queue.survey()
+    rows = [
+        {
+            "Document": s.key,
+            "Status": s.status,
+            "Progress": s.fraction,
+            "Chunks": f"{s.chunks_done}/{s.chunks_total}" if s.chunks_total else "—",
+            "Skip": s.skip,
+        }
+        for s in queue_states
+    ]
+    edited = st.data_editor(
+        rows,
+        hide_index=True,
+        width="stretch",
+        disabled=["Document", "Status", "Progress", "Chunks"],
+        column_config={
+            "Progress": st.column_config.ProgressColumn(
+                "Progress", min_value=0.0, max_value=1.0, format="%.0f%%"
+            ),
+            "Skip": st.column_config.CheckboxColumn(
+                "Skip", help="Leave this document out of the queue"
+            ),
+        },
+        key="queue_editor",
     )
+
+    # Persist only what changed; writing every row on every rerun would churn
+    # the file and fight the user's next click.
+    # strict=True deliberately: these must stay aligned row for row. If they
+    # ever diverged, a Skip toggle would be written to the wrong document.
+    for original, row in zip(queue_states, edited, strict=True):
+        if bool(row.get("Skip")) != original.skip:
+            bt_queue.set_skip(original.key, bool(row.get("Skip")))
+
+    nxt = bt_queue.next_pending()
+    stalled = [s for s in queue_states if s.status == "stalled"]
+    st.caption(
+        f"Next up: **{nxt.key}**" if nxt else "Nothing pending — every document is done or skipped."
+    )
+    if stalled:
+        st.warning(
+            "Stopped making progress after repeated attempts: "
+            + ", ".join(s.key for s in stalled)
+            + ". The worker has moved on; clear the attempt count by unskipping or "
+            "investigate that document.",
+            icon=":material/error:",
+        )
 
 # --------------------------------------------------------------------------
 # 1. analysis
 # --------------------------------------------------------------------------
 st.header(pdf_path.name)
 info = cached_analysis(str(pdf_path), stat.st_mtime, stat.st_size)
+
+if PUBLIC_MODE and info.output_pages > auth.MAX_PAGES_PER_DOCUMENT:
+    st.error(
+        f"This document would produce {info.output_pages} pages, over this "
+        f"free demo's {auth.MAX_PAGES_PER_DOCUMENT}-page limit per document. "
+        "Try a shorter excerpt.",
+        icon=":material/block:",
+    )
+    st.stop()
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Pages in file", info.pages)

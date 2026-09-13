@@ -11,6 +11,11 @@
 # this repo was built around (measured 82-95 s/page on Apple Silicon) --
 # expect single-digit minutes per page. That is a real product tradeoff of
 # using free infrastructure, not a bug in this image.
+#
+# BT_PUBLIC_MODE=1 turns on the login gate and per-account page cap in
+# app.py (see bt/auth.py) -- both exist only because this is a public,
+# multi-visitor deployment on one shared container; local, personal use of
+# this repo never sets the variable and never sees either.
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -42,6 +47,7 @@ RUN mkdir -p uploads output && chown -R appuser:appuser /app
 
 USER appuser
 ENV HOME=/home/appuser \
+    BT_PUBLIC_MODE=1 \
     HF_HUB_DISABLE_XET=1 \
     OCR_ERROR_SERVER_STARTUP_TIMEOUT=1800 \
     DETECTOR_SERVER_STARTUP_TIMEOUT=1800 \

@@ -103,3 +103,65 @@ def test_switching_document_does_not_raise(app):
         pytest.skip("no PDFs available to select")
     app.selectbox[0].set_value(pdfs[0]).run()
     assert not app.exception, [str(e.value) for e in app.exception]
+
+
+# --------------------------------------------------------------------------
+# PUBLIC_MODE: the login gate the Hugging Face Spaces deployment sets
+# BT_PUBLIC_MODE=1 for. Off by default, so every test above already covers
+# that this feature changes nothing for local, personal use.
+# --------------------------------------------------------------------------
+def _public_app(monkeypatch) -> AppTest:
+    monkeypatch.setenv("BT_PUBLIC_MODE", "1")
+    return AppTest.from_file(APP, default_timeout=TIMEOUT)
+
+
+def test_public_mode_shows_login_gate_when_logged_out(monkeypatch):
+    at = _public_app(monkeypatch)
+    at.run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    # The ordinary document picker and queue must not be reachable pre-login.
+    assert not at.selectbox
+    assert "Queue" not in [s.value for s in at.subheader]
+    assert any("New here" in t.label for t in at.tabs)
+
+
+def test_public_mode_signup_shows_a_one_time_code(monkeypatch):
+    at = _public_app(monkeypatch)
+    at.run()
+    signup = at.tabs[0]
+    signup.text_input[0].set_value("newuser")
+    signup.text_input[1].set_value("newuser@example.com")
+    signup.button[0].click().run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert any("one-time login code" in s.value for s in at.success)
+
+
+def test_public_mode_login_rejects_wrong_code(monkeypatch):
+    from bt import auth
+
+    auth.signup("someone", "someone@example.com")
+    at = _public_app(monkeypatch)
+    at.run()
+    login = at.tabs[1]
+    login.text_input[0].set_value("someone")
+    login.text_input[1].set_value("000000")
+    login.button[0].click().run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert any("Wrong username or code" in e.value for e in at.error)
+    assert "user" not in at.session_state
+
+
+def test_public_mode_logged_in_hides_queue(monkeypatch):
+    """A signed-in user with nothing uploaded yet sees the upload prompt, not
+
+    the Queue panel -- that panel lists and can launch unattended processing
+    across every account's uploads, which has no way to respect the
+    per-account page cap.
+    """
+    at = _public_app(monkeypatch)
+    at.session_state["user"] = "someone"
+    at.run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert "Queue" not in [s.value for s in at.subheader]
+    assert any("Signed in as" in c.value for c in at.caption)
+    assert any("Choose a PDF" in i.value for i in at.info)

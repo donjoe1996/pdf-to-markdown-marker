@@ -25,6 +25,7 @@ from pathlib import Path
 import pymupdf
 import pytest
 
+from bt import auth as bt_auth
 from bt import jobs
 from bt import queue as bt_queue
 
@@ -58,6 +59,11 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(bt_queue, "ROOT", tmp_path)
     monkeypatch.setattr(bt_queue, "OUTPUT_ROOT", out_root)
     monkeypatch.setattr(bt_queue, "QUEUE_FILE", out_root / "queue.json")
+
+    # account state -- same reasoning as queue.json above
+    monkeypatch.setattr(bt_auth, "ROOT", tmp_path)
+    monkeypatch.setattr(bt_auth, "OUTPUT_ROOT", out_root)
+    monkeypatch.setattr(bt_auth, "ACCOUNTS_FILE", out_root / "accounts.json")
 
     return tmp_path
 

@@ -170,8 +170,31 @@ runs noticeably slower there -- budget minutes per page, not seconds. A free
 Space also sleeps after a period of inactivity and cold-starts on the next
 visit. The models (~1.8 GB) are baked into the Docker image at build time
 specifically to keep that cold start to "container restart," not "download
-1.8 GB again." There is also no login: anyone with the link can use it and
-see whatever is uploaded, which is fine for a personal MVP but worth knowing.
+1.8 GB again."
+
+**A naive login, so one visitor's pages don't become everyone's problem.**
+`BT_PUBLIC_MODE=1` (set by the Dockerfile, never by a local run) turns on a
+lightweight account gate in `app.py`, backed by `bt/auth.py`:
+
+- Sign up with just a username and an email -- **the email is never
+  verified.** A one-time code is shown once, right there in the browser, and
+  that's the login: no inbox is ever involved, including for "forgot your
+  code," which just reissues a new code to anyone who can name a matching
+  username + email pair. This is intentionally not real security -- it
+  exists to give each visitor a private upload folder and a place to hang
+  the page cap below, not to prove who anyone is.
+- Each document is capped at `bt.auth.MAX_PAGES_PER_DOCUMENT` (5) pages after
+  splitting; a longer upload is rejected outright rather than truncated,
+  since the free CPU tier is shared by everyone using the link at once.
+- Accounts live in `output/accounts.json` -- **not persistent** on the free
+  Spaces tier. Only the Docker image itself survives a sleep/restart cycle;
+  anything written at runtime, accounts and uploads included, resets with
+  it. Fine for a casual demo link; if real persistence matters, look at
+  Spaces' paid persistent storage, or syncing that file to a free private HF
+  Dataset repo with the same token this deployment already uses.
+- The unattended queue worker (below) is hidden in this mode: it would
+  process every account's uploads at once with no way to see the per-account
+  cap, on hardware sized for one job at a time.
 
 One-time setup (a Hugging Face account and a repository setting need a human
 with access to click them -- nothing here can do that for you):

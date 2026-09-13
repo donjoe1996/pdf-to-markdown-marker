@@ -408,6 +408,66 @@ def release_worker_lock() -> None:
     worker_lock_path().unlink(missing_ok=True)
 
 
+def worker_command() -> list[str]:
+    return [sys.executable, "-u", "-m", "bt.worker"]
+
+
+def worker_log_path() -> Path:
+    return worker_lock_path().parent / "worker.log"
+
+
+def start_worker(wait: float = 5.0) -> list[str]:
+    """Launch the queue worker detached, as the GUI's start button does.
+
+    Detached for the same reason as a job: the worker must outlive the browser
+    tab and the Streamlit process. Returns the command it ran so the GUI can
+    show exactly what happened. Waits briefly for the worker to claim its lock,
+    so the page that reruns next already shows it as running.
+    """
+    running = worker_pid()
+    if running is not None:
+        raise RuntimeError(f"a worker is already running (pid {running})")
+
+    cmd = worker_command()
+    log_file = worker_log_path()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    with log_file.open("ab") as log:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            cwd=Path(__file__).resolve().parent.parent,
+            start_new_session=True,
+        )
+
+    deadline = time.time() + wait
+    while time.time() < deadline and worker_pid() is None and proc.poll() is None:
+        time.sleep(0.2)
+    return cmd
+
+
+def stop_worker(wait: float = 5.0) -> list[str] | None:
+    """Ask the worker to exit. Returns the equivalent shell command, or None.
+
+    SIGTERM only, and only to the worker's own pid: it finishes its current
+    wait, releases the lock and exits within a couple of seconds. A job it
+    already launched lives in its own session and keeps running -- stopping
+    that is a separate, deliberate step (``stop_pids``).
+    """
+    pid = worker_pid()
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return None
+
+    deadline = time.time() + wait
+    while time.time() < deadline and _alive(pid):
+        time.sleep(0.2)
+    return ["kill", "-TERM", str(pid)]
+
+
 def wait_for_pid(pid: int, poll: float = 5.0) -> None:
     """Block until a process exits."""
     while _alive(pid):

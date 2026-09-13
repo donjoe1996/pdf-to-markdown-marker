@@ -10,6 +10,7 @@ run. See bt/jobs.py for why that matters.
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import pymupdf
@@ -187,11 +188,60 @@ if worker:
     )
 else:
     st.warning(
-        "No worker running — books will not advance on their own. Start one in "
-        "a terminal and leave it going:",
+        "No worker running — books will not advance on their own.",
         icon=":material/pause_circle:",
     )
-    st.code("uv run python -m bt.worker", language="bash")
+
+# The worker is detached, so the button only sends a command; the page state
+# still comes from disk. The command is echoed so a click is never a mystery.
+try:
+    worker_log = str(jobs.worker_log_path().relative_to(ROOT))
+except ValueError:
+    worker_log = str(jobs.worker_log_path())
+start_preview = shlex.join(jobs.worker_command()) + f" >> {worker_log} 2>&1 &"
+
+worker_row = st.container(horizontal=True, vertical_alignment="center")
+if worker:
+    # Stopping the worker alone leaves its current job (and llama-server's
+    # ~2.5 GB) running, which is rarely what "stop" is for.
+    also_job = bool(runs) and worker_row.checkbox(
+        "Also stop the running job",
+        value=True,
+        help="Frees the job's memory, llama-server included. Finished chunks are kept.",
+    )
+    if worker_row.button("Stop worker", icon=":material/stop_circle:"):
+        executed = [shlex.join(jobs.stop_worker() or ["# worker had already exited"])]
+        if also_job:
+            for run in runs:
+                jobs.stop_pids(run.pids)
+                executed.append(shlex.join(["kill", "-TERM", *map(str, run.pids)]))
+            executed.append("pkill -f llama-server")
+        st.session_state["worker_cmd"] = "\n".join(executed)
+        st.toast("Worker stopped", icon=":material/stop_circle:")
+        st.rerun()
+else:
+    if worker_row.button("Start worker", type="primary", icon=":material/play_circle:"):
+        try:
+            jobs.start_worker()
+            st.session_state["worker_cmd"] = f"cd {shlex.quote(str(ROOT))}\n{start_preview}"
+            st.toast("Worker started", icon=":material/play_circle:")
+            st.rerun()
+        except RuntimeError as exc:
+            st.error(str(exc), icon=":material/error:")
+
+if "worker_cmd" in st.session_state:
+    st.caption("Last command run from this page")
+    st.code(st.session_state["worker_cmd"], language="bash")
+elif worker:
+    stop_preview = [f"kill -TERM {worker}"]
+    if also_job:
+        stop_preview += [shlex.join(["kill", "-TERM", *map(str, r.pids)]) for r in runs]
+        stop_preview.append("pkill -f llama-server")
+    st.caption("Stop runs")
+    st.code("\n".join(stop_preview), language="bash")
+else:
+    st.caption(f"Start runs (output goes to `{worker_log}`)")
+    st.code(start_preview, language="bash")
 
 queue_states = bt_queue.survey()
 rows = [

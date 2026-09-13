@@ -74,6 +74,28 @@ def test_document_picker_offers_upload(app):
     assert any("Upload" in o for o in options)
 
 
+def test_worker_button_starts_and_echoes_the_command(monkeypatch):
+    """The start button shows what it ran, so a click is never a mystery.
+
+    ``start_worker`` is stubbed: a real one would launch ``bt.worker`` against
+    the repo and start transcribing.
+    """
+    from bt import jobs
+
+    calls = []
+    monkeypatch.setattr(jobs, "start_worker", lambda: calls.append(1) or jobs.worker_command())
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    at.run()
+    if not has_documents(at):
+        pytest.skip("the queue panel needs a document")
+
+    start = next(b for b in at.button if b.label == "Start worker")
+    start.click().run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert calls == [1]
+    assert any("-m bt.worker" in c.value for c in at.code)
+
+
 def test_switching_document_does_not_raise(app):
     """Changing the selection re-runs the whole script, analysis included."""
     pdfs = [o for o in app.selectbox[0].options if o.endswith(".pdf")]

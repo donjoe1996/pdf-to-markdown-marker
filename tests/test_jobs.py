@@ -158,6 +158,67 @@ def test_worker_lock_from_a_dead_process_is_ignored():
 
 
 # --------------------------------------------------------------------------
+# starting and stopping the worker from the GUI
+# --------------------------------------------------------------------------
+def test_worker_command_is_not_mistaken_for_a_job():
+    """A GUI-started worker must not match PIPELINE_CMD, or it would show up as
+    a running job and the worker would wait on itself."""
+    cmd = " ".join(jobs.worker_command())
+    assert "-m bt.worker" in cmd
+    assert not PIPELINE_CMD.search(cmd)
+
+
+def test_start_worker_refuses_a_second_worker():
+    """Two workers means two llama-servers -- the swap collapse in QnA.md Q2."""
+    assert jobs.claim_worker_lock() is True  # this test process is "the worker"
+    with pytest.raises(RuntimeError):
+        jobs.start_worker(wait=0)
+    jobs.release_worker_lock()
+
+
+def test_start_worker_launches_detached_and_logs(monkeypatch):
+    # Never launch the real bt.worker from a test: it would claim the repo's
+    # lock and start transcribing. A sleep stands in for it.
+    monkeypatch.setattr(jobs, "worker_command", lambda: ["sleep", "30"])
+    cmd = jobs.start_worker(wait=0)
+    pids = [p for p in _pids_of("sleep 30")]
+    try:
+        assert cmd[:2] == ["sleep", "30"]
+        assert pids, "the worker process was not started"
+        assert jobs.worker_log_path().exists()
+    finally:
+        for pid in pids:
+            jobs.stop_pids([pid], kill_inference=False)
+
+
+def test_stop_worker_terminates_only_the_worker():
+    proc = subprocess.Popen(["sleep", "30"])
+    jobs.worker_lock_path().write_text(json.dumps({"pid": proc.pid, "started": 0}))
+    try:
+        cmd = jobs.stop_worker(wait=5)
+        assert cmd == ["kill", "-TERM", str(proc.pid)]
+        assert jobs.is_alive(proc.pid) is False
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+
+def test_stop_worker_without_a_worker_does_nothing():
+    assert jobs.stop_worker(wait=0) is None
+
+
+def _pids_of(pattern: str) -> list[int]:
+    """Children of this test process matching a command line."""
+    import os
+
+    out = subprocess.run(
+        ["pgrep", "-P", str(os.getpid()), "-f", pattern], capture_output=True, text=True
+    )
+    return [int(p) for p in out.stdout.split()]
+
+
+# --------------------------------------------------------------------------
 # status from disk
 # --------------------------------------------------------------------------
 def test_status_counts_chunks_and_reads_the_spec(out_dir, write_lock, make_chunks, tmp_path):

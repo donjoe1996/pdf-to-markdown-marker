@@ -669,17 +669,51 @@ if result.exists():
                 "out of the request and re-attached here."
             )
 
-        if provider.key_env and not os.environ.get(provider.key_env):
-            st.warning(
-                f"`{provider.key_env}` is not set. It is free to obtain from "
-                f"{provider_name}; export it and restart the app.",
-                icon=":material/key_off:",
-            )
-        elif not provider.key_env:
+        # The key, pasted rather than exported. Exporting one means restarting
+        # the app, which on a machine mid-run is the most expensive way to
+        # supply a string. This field is the same key by a shorter path:
+        # jobs.start_translate() puts it in the child's environment, which is
+        # exactly where an exported one would have been read from.
+        #
+        # Keyed per provider on purpose. One shared box would carry a groq key
+        # into a gemini run -- refused by the server, and a secret sent to a
+        # service it was not issued for.
+        api_key = ""
+        if provider.key_env:
+            api_key = (
+                st.text_input(
+                    f"API key for {provider_name}",
+                    type="password",
+                    key=f"apikey-{provider_name}",
+                    placeholder=f"Paste it here, or export ${provider.key_env}",
+                    icon=":material/key:",
+                    help="Free to obtain from the provider. Kept in this browser "
+                    "session only: it is never written to disk, never put on a "
+                    "command line, and is handed to the run through its "
+                    "environment. Leave it empty to use the exported variable.",
+                )
+                or ""
+            ).strip()
+
+        env_key = os.environ.get(provider.key_env or "", "")
+        if not provider.key_env:
             st.info(
                 "Needs a server already running and serving an instruct model — "
                 "this is not the one marker spawns for OCR.",
                 icon=":material/dns:",
+            )
+        elif api_key:
+            st.caption(
+                f"Using the key above for this session. `{provider.key_env}` is "
+                "not modified, and the key is not saved anywhere."
+            )
+        elif env_key:
+            st.caption(f"Using `{provider.key_env}` from the environment.")
+        else:
+            st.warning(
+                f"No key yet. `{provider.key_env}` is not set either — paste one "
+                f"above; it is free to obtain from {provider_name}.",
+                icon=":material/key_off:",
             )
 
         row = st.container(horizontal=True, vertical_alignment="center")
@@ -698,7 +732,7 @@ if result.exists():
             )
             if row.button(label, type="primary", icon=":material/translate:"):
                 try:
-                    jobs.start_translate(t_spec, out_dir)
+                    jobs.start_translate(t_spec, out_dir, api_key=api_key)
                     st.rerun()
                 except RuntimeError as exc:
                     st.error(str(exc), icon=":material/error:")

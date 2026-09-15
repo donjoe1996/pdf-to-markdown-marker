@@ -348,6 +348,18 @@ they cost disk and hours; the hosted free tiers need a free key and come with a
 request budget. `local` is *not* the llama-server marker spawns — that one
 serves surya's OCR model, not a translator, and needs its own instance.
 
+**A key pasted into the GUI travels only in the child's environment.**
+`jobs.translate_env()` copies `os.environ`, sets the provider's own `key_env`,
+and hands it to `Popen`; `OpenAICompatTranslator` then reads it exactly as it
+reads an exported one, so there is one code path and no key parameter in the
+backend. The two alternatives both leak: a `--api-key` flag would publish the
+secret in `ps` for the hours the run takes — this project reads other
+processes' command lines itself, in `find_pipeline_processes()` — and a field
+on `TranslateSpec` would be serialised into `.translate.lock`, which sits next
+to the book and outlives the run. The GUI field is keyed per provider, so
+switching providers cannot send groq's key to gemini, and an empty field leaves
+an exported variable alone.
+
 **Model ids are presets, not constants.** Free-tier ids are retired regularly,
 so `--model` overrides without a code change and the GUI shows the id in an
 editable field rather than a fixed list.

@@ -10,6 +10,7 @@ lock -- the autouse ``isolate`` fixture redirects the last two, and
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 
@@ -295,3 +296,101 @@ def test_translate_status_counts_its_own_chunks_not_the_ocr_chunks(out_dir, make
 def test_translate_status_is_not_running_without_a_lock(out_dir):
     st = jobs.translate_status(out_dir)
     assert st.running is False and st.chunks_done == 0
+
+
+# --------------------------------------------------------------------------
+# an API key pasted into the GUI
+# --------------------------------------------------------------------------
+@pytest.fixture
+def fake_popen(monkeypatch):
+    """Capture the Popen call instead of launching a translator."""
+    calls = []
+
+    class _Proc:
+        pid = 424242
+
+    def _popen(cmd, **kw):
+        calls.append((cmd, kw))
+        return _Proc()
+
+    monkeypatch.setattr(jobs.subprocess, "Popen", _popen)
+    return calls
+
+
+def test_a_pasted_key_reaches_the_child_through_the_environment(out_dir, fake_popen):
+    """The GUI must be able to supply the key the detached run reads.
+
+    ``OpenAICompatTranslator`` reads ``os.environ[key_env]``, so handing the
+    child an environment is the whole mechanism: pasting a key and exporting
+    one become the same code path, and the backend needs no key argument at
+    all. The env var name comes from the provider, not the caller, so the GUI
+    and the CLI cannot disagree about where groq's key lives.
+    """
+    spec = jobs.TranslateSpec(
+        src=str(out_dir / "book.md"), out=str(out_dir / "book.en.md"), provider="groq"
+    )
+    jobs.start_translate(spec, out_dir, api_key="gsk-secret")
+
+    (_cmd, kw) = fake_popen[0]
+    assert kw["env"]["GROQ_API_KEY"] == "gsk-secret"
+    # Inherited, not replaced: PATH and the HF vars must survive.
+    assert kw["env"]["PATH"] == os.environ["PATH"]
+
+
+def test_a_pasted_key_never_reaches_the_command_line(out_dir, fake_popen):
+    """`ps` is readable by every user on the machine -- and by this project.
+
+    ``find_pipeline_processes()`` exists precisely because command lines are
+    public. A ``--api-key`` flag would publish the secret to anyone running
+    ``ps``, for the hours the run takes.
+    """
+    spec = jobs.TranslateSpec(
+        src=str(out_dir / "book.md"), out=str(out_dir / "book.en.md"), provider="groq"
+    )
+    jobs.start_translate(spec, out_dir, api_key="gsk-secret")
+
+    assert "gsk-secret" not in " ".join(fake_popen[0][0])
+
+
+def test_a_pasted_key_never_reaches_the_lock_file(out_dir, fake_popen):
+    """``start_translate`` writes ``asdict(spec)`` to disk, under ``output/``.
+
+    So the key must not live on the spec: that file is written next to the
+    book, survives the run, and gets copied around with the output folder.
+    """
+    spec = jobs.TranslateSpec(
+        src=str(out_dir / "book.md"), out=str(out_dir / "book.en.md"), provider="groq"
+    )
+    jobs.start_translate(spec, out_dir, api_key="gsk-secret")
+
+    assert "gsk-secret" not in jobs.translate_lock_path(out_dir).read_text()
+
+
+def test_an_empty_key_leaves_an_exported_one_alone(out_dir, fake_popen, monkeypatch):
+    """A blank field means "use what is already exported", not "unset it".
+
+    Overriding with "" would make the child fail with a missing-key error on a
+    machine where the key was exported before the app started.
+    """
+    monkeypatch.setenv("GROQ_API_KEY", "from-the-shell")
+    spec = jobs.TranslateSpec(
+        src=str(out_dir / "book.md"), out=str(out_dir / "book.en.md"), provider="groq"
+    )
+    jobs.start_translate(spec, out_dir, api_key="")
+
+    assert fake_popen[0][1]["env"]["GROQ_API_KEY"] == "from-the-shell"
+
+
+def test_a_key_pasted_for_a_keyless_provider_is_dropped(out_dir, fake_popen):
+    """`local` and `ollama` have no key_env; there is nowhere to put it.
+
+    Inventing a variable name would either do nothing or send a secret to a
+    server that never asked for one.
+    """
+    spec = jobs.TranslateSpec(
+        src=str(out_dir / "book.md"), out=str(out_dir / "book.en.md"), provider="local"
+    )
+    jobs.start_translate(spec, out_dir, api_key="gsk-secret")
+
+    env = fake_popen[0][1]["env"]
+    assert "gsk-secret" not in env.values()

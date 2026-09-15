@@ -13,6 +13,14 @@ dependencies = [
     # The local GUI. Needs >=1.37 for st.fragment(run_every=...), which lets the
     # progress panel refresh without re-running the whole script.
     "streamlit>=1.37",
+    # Optional stage 4 (bt.translate). Already arrives with marker-pdf, which
+    # pins it <1; declared anyway so the dependency is visible and survives
+    # marker dropping it. No upper bound here -- pinning one would fight
+    # marker's. 0.69 is the floor for output_config/stop_details, both of which
+    # translate.py uses. Imported inside ClaudeTranslator, not at module scope,
+    # so the fast suite never touches it and the pipeline runs with no
+    # credentials and no network.
+    "anthropic>=0.69",
 ]
 
 [project.scripts]

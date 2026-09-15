@@ -102,6 +102,7 @@ name = "bt-transcribe"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anthropic" },
     { name = "hf-transfer" },
     { name = "marker-pdf" },
     { name = "numpy" },
@@ -117,6 +118,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anthropic", specifier = ">=0.69" },
     { name = "hf-transfer", specifier = ">=0.1.9" },
     { name = "marker-pdf", specifier = ">=2.0.0,<3" },
     { name = "numpy", specifier = ">=1.26" },

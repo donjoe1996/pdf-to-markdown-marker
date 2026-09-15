@@ -74,6 +74,13 @@ def _could_be_head(line: str) -> bool:
         return False  # a sentence, not a label
     if "<sup>" in s or re.search(r"\[\^", s):
         return False  # footnote text, not a head
+    if "](" in s:
+        # An image or link, not a head. Extracted figures are named by page and
+        # figure number, so `images/0000-0009_page_3_Figure_2.jpeg` normalises
+        # to exactly the same form on every page -- a book with a chart on most
+        # pages would have every figure deleted as a running head, leaving text
+        # that still reads perfectly with the pictures silently gone.
+        return False
     return True
 
 

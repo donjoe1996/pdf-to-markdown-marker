@@ -93,18 +93,6 @@ def bundle_zip(md_path: str, image_paths: tuple[str, ...]) -> bytes:
     return buf.getvalue()
 
 
-def has_anthropic_credentials() -> bool:
-    """Whether the SDK will find a credential without being handed one.
-
-    It resolves an API key from the environment or a profile written by
-    ``ant auth login``; nothing is read or stored here, so this only decides
-    whether to warn before a long job fails on its first request.
-    """
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        return True
-    return (Path.home() / ".config" / "anthropic").exists()
-
-
 def human_time(seconds: float) -> str:
     if seconds < 90:
         return f"{seconds:.0f}s"
@@ -622,43 +610,76 @@ if result.exists():
     # ----------------------------------------------------------------------
     # 6. translation -- optional, and a separate job from the pipeline
     # ----------------------------------------------------------------------
-    from bt.translate import DEFAULT_MODEL, default_out_path
+    from bt.translate import DEFAULT_PROVIDER, PROVIDERS, default_out_path
 
     st.subheader("Translate")
     with st.container(border=True):
-        t1, t2, t3 = st.columns([2, 2, 1])
+        t1, t2 = st.columns(2)
         target = t1.text_input(
             "Target language", "English", help="Any language; the source is detected."
         )
-        model = t2.selectbox(
-            "Model",
-            [DEFAULT_MODEL, "claude-sonnet-5", "claude-haiku-4-5"],
-            help="A whole book is one request per page. Sonnet and Haiku cost "
-            "less per page; Opus reads damaged OCR more reliably.",
+        provider_names = sorted(PROVIDERS)
+        provider_name = t2.selectbox(
+            "Provider",
+            provider_names,
+            index=provider_names.index(DEFAULT_PROVIDER),
+            format_func=lambda n: f"{n} — {PROVIDERS[n].note}",
+            help="All of these are free. The local ones need no account and no "
+            "network but run on this machine; the hosted ones need a free key "
+            "and a request budget.",
         )
-        t_chunk = t3.number_input("Pages per chunk", 1, 50, 10)
+        provider = PROVIDERS[provider_name]
+
+        t3, t4 = st.columns([3, 1])
+        model = t3.text_input(
+            "Model",
+            value=provider.model,
+            key=f"model-{provider_name}",
+            help="Free-tier model ids get retired; if one stops working, put a "
+            "current one here. A local server ignores the name and serves "
+            "whatever it loaded.",
+        )
+        t_chunk = t4.number_input("Pages per chunk", 1, 50, 10)
 
         translated_md = default_out_path(result, target)
         t_spec = jobs.TranslateSpec(
             src=str(result),
             out=str(translated_md),
             target=target,
-            model=model,
+            provider=provider_name,
+            model=model.strip(),
             pages_per_chunk=int(t_chunk),
             total_pages=text.count("<!-- page ") or 1,
         )
         t_job = jobs.translate_status(out_dir)
 
-        st.caption(
-            f"Sends the text of `{result.name}` to the Anthropic API, one page "
-            "per request. Page anchors, footnote ids and image links are kept "
-            "out of the request and re-attached here, so they cannot be lost."
-        )
-        if not has_anthropic_credentials():
+        pages_to_do = t_spec.total_pages
+        if provider.key_env:
+            st.caption(
+                f"Sends the text of `{result.name}` to {provider.base_url}, one "
+                f"request per page ({pages_to_do} pages), paced to "
+                f"{provider.rpm}/min. Page anchors, footnote ids and image links "
+                "are kept out of the request and re-attached here."
+            )
+        else:
+            st.caption(
+                f"Runs against a server on this machine ({provider.base_url}), "
+                f"one request per page ({pages_to_do} pages). Nothing leaves the "
+                "machine. Page anchors, footnote ids and image links are kept "
+                "out of the request and re-attached here."
+            )
+
+        if provider.key_env and not os.environ.get(provider.key_env):
             st.warning(
-                "No Anthropic credentials found. Set `ANTHROPIC_API_KEY` in the "
-                "environment, or run `ant auth login`, then restart the app.",
+                f"`{provider.key_env}` is not set. It is free to obtain from "
+                f"{provider_name}; export it and restart the app.",
                 icon=":material/key_off:",
+            )
+        elif not provider.key_env:
+            st.info(
+                "Needs a server already running and serving an instruct model — "
+                "this is not the one marker spawns for OCR.",
+                icon=":material/dns:",
             )
 
         row = st.container(horizontal=True, vertical_alignment="center")

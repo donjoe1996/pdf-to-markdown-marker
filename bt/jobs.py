@@ -386,7 +386,8 @@ class TranslateSpec:
     src: str
     out: str
     target: str = "English"
-    model: str = "claude-opus-5"
+    provider: str = "openrouter"
+    model: str = ""  # empty means the provider's own default
     pages_per_chunk: int = 10
     total_pages: int = 0  # pages in the source markdown; drives the progress bar
 
@@ -395,14 +396,17 @@ class TranslateSpec:
         return Path(self.src).parent / TRANSLATE_DIR / "chunks"
 
     def command(self) -> list[str]:
-        return [
+        cmd = [
             sys.executable, "-u", "-m", "bt.translate",
             self.src, self.out,
             "--target", self.target,
-            "--model", self.model,
+            "--provider", self.provider,
             "--pages-per-chunk", str(self.pages_per_chunk),
             "--chunk-dir", str(self.chunk_dir),
         ]
+        if self.model:
+            cmd += ["--model", self.model]
+        return cmd
 
 
 def translate_lock_path(out_dir: str | Path) -> Path:

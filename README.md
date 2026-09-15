@@ -159,11 +159,29 @@ Or the **Translate** panel under Result in the GUI. Optional and separate from
 the pipeline — translating a transcription nobody has looked at only multiplies
 whatever the OCR got wrong, so it is never run automatically.
 
-It works page by page through the Claude API (`ANTHROPIC_API_KEY`, or a profile
-from `ant auth login`), and is resumable the same way transcription is: each
-chunk of pages is written atomically and skipped on re-run, so a rate limit at
-page 300 costs the current chunk and nothing else. The source language is
-detected by the model; `--target` takes any language, not just English.
+It works page by page through **any OpenAI-compatible endpoint**, and every
+preset is free. It is resumable the same way transcription is: each chunk of
+pages is written atomically and skipped on re-run, so a rate limit at page 300
+costs the current chunk and nothing else. The source language is detected by the
+model; `--target` takes any language, not just English.
+
+| `--provider` | Needs | Notes |
+|---|---|---|
+| `local` | a llama-server you start | Free and offline. **Not** the server marker spawns — that one serves surya's OCR model. Run `llama-server -hf <a GGUF instruct model> --port 8080` |
+| `ollama` | Ollama running | Free and offline |
+| `openrouter` | free key in `$OPENROUTER_API_KEY` | Free models carry a `:free` suffix; paced to 20 req/min |
+| `groq` | free key in `$GROQ_API_KEY` | Free tier, by far the fastest of these |
+| `gemini` | free key in `$GEMINI_API_KEY` | Free tier; strongest of these on Spanish |
+
+The local providers cost nothing but disk and hours — a book runs at roughly the
+speed of the OCR. The hosted free tiers cost nothing but a signup and a request
+budget, which is why requests are **paced** rather than fired as fast as
+possible: a 429 costs the request *and* the backoff, and free tiers count
+refusals, so waiting three seconds by choice beats being refused and waiting
+sixty. `--rpm 0` turns pacing off.
+
+Free-tier model ids are retired regularly. When one stops working, `--model`
+(or the Model field in the GUI) replaces it without a code change.
 
 The page anchors are **never sent to the model**. They are stripped before the
 request and re-attached afterwards, so a page cannot be renumbered or lost — a
@@ -175,9 +193,12 @@ before and after instead, and every page where one changed is reported.
 | Flag | Effect |
 |---|---|
 | `--target LANG` | target language (default English) |
-| `--model ID` | default `claude-opus-5`; Sonnet and Haiku cost less per page |
+| `--provider NAME` | one of the table above (default `openrouter`) |
+| `--model ID` | override the provider's default model |
+| `--base-url URL` | point at any other OpenAI-compatible endpoint |
+| `--rpm N` | requests per minute to hold to; `0` disables pacing |
 | `--pages-per-chunk N` | pages per resumable chunk (default 10) |
-| `--effort LEVEL` | default `low` — translation is high-volume, low-judgement work |
+| `--max-tokens N` | output cap per page (default 8000) |
 | `--no-resume` | redo chunks that already exist |
 
 ## Keeping the machine busy — the queue worker
@@ -344,7 +365,10 @@ documents legitimately have none.
 - PyMuPDF is AGPL-licensed — fine for local use, relevant if redistributed.
 - **Figure extraction is marker's**, so what counts as a figure is its call; the
   pipeline only names the files safely and keeps the links pointing at them.
-- **Translation sends the text to the Anthropic API** and costs roughly one
-  request per page. It is checked for structural damage (lost pages, drifted
-  footnote ids), not for accuracy — nothing here verifies the translation is
-  *right*.
+- **Translation quality is not checked.** The output is verified for structural
+  damage (lost pages, drifted footnote ids, truncation), not for accuracy —
+  nothing here confirms the translation is *right*, and the free models are
+  weaker at this than the paid ones. Read a page against the scan before
+  trusting a whole book.
+- **A hosted provider sends the text off this machine.** `local` and `ollama`
+  do not; that is the tradeoff against their speed.

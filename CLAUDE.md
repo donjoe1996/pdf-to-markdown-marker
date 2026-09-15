@@ -31,6 +31,7 @@ uv run python -m bt.postprocess output/NAME/raw.md --report  # tune transforms, 
 
 uv run bt-transcribe --pdf FILE.pdf --images            # keep figures/charts too
 uv run python -m bt.translate output/NAME/NAME.md --target English   # optional stage 4
+uv run python -m bt.translate FILE.md --provider local              # offline, no key
 ```
 
 **`--pdf` is required** — there is no default document any more.
@@ -136,7 +137,7 @@ at.selectbox[0].set_value("meditationsofmar00marc.pdf").run()
 | 2a | `warmup.py` | Pre-download every model before any timed spawn |
 | 2b | `transcribe.py` | Chunked, resumable OCR via marker |
 | 3 | `postprocess.py` | Strip heads, namespace footnotes, dehyphenate |
-| 4 | `translate.py` | **Optional.** Translate the finished Markdown via the Claude API |
+| 4 | `translate.py` | **Optional.** Translate the finished Markdown via a free LLM endpoint |
 | — | `verify.py` | Quality checks on the finished Markdown |
 
 `transcribe.py` and `warmup.py` set env vars **at import time, before torch is
@@ -335,11 +336,32 @@ counts files there to decide a book is done). `PIPELINE_CMD` deliberately does
 not match `bt.translate`: translation waits on the network, not on memory, so it
 neither needs nor should hold the one-OCR-at-a-time lock.
 
-Defaults: `claude-opus-5` at `effort="low"` (high-volume, low-judgement work —
-effort is charged per page and buys nothing here), one request per page, blank
-pages skipped. `stop_reason` is checked before the text is read: a `max_tokens`
-truncation is an error, because a page cut off mid-sentence reads exactly like a
-page that ended there.
+**Every backend is free, and they are all one backend.** `OpenAICompatTranslator`
+speaks `/v1/chat/completions`, which llama.cpp, Ollama, OpenRouter, Groq and
+Google's compatibility endpoint all serve — so there is one code path, and
+`PROVIDERS` is just presets over it. Written on `urllib`, not a vendor SDK: it
+adds no dependency, and the part that needs care is the rate limiting, which no
+SDK does the way a 582-page unattended run needs.
+
+`local` and `ollama` need no account and no network but run on this machine, so
+they cost disk and hours; the hosted free tiers need a free key and come with a
+request budget. `local` is *not* the llama-server marker spawns — that one
+serves surya's OCR model, not a translator, and needs its own instance.
+
+**Model ids are presets, not constants.** Free-tier ids are retired regularly,
+so `--model` overrides without a code change and the GUI shows the id in an
+editable field rather than a fixed list.
+
+**Pacing is deliberate, not reactive.** `rpm` holds to the provider's budget by
+waiting *before* the request. A 429 costs the request and the backoff, and free
+tiers count refusals — so waiting 3s by choice beats being refused and waiting
+60s. `Retry-After` wins over the exponential backoff when the server sends one.
+A 429 or 5xx is retried; a 400 is raised immediately, because a bad model id
+fails identically 582 times.
+
+`finish_reason == "length"` is an error, not a result. Free models have small
+output caps, and a page truncated mid-sentence reads exactly like a page that
+ended there — this is the likeliest silent failure of the stage.
 
 ## Running on a GPU (Colab)
 

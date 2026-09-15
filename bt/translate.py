@@ -21,9 +21,11 @@ so a rate limit at page 300 costs the current chunk and nothing else.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -31,17 +33,12 @@ from bt.postprocess import PAGE_ANCHOR_FMT, PAGE_MARK, split_pages
 from bt.transcribe import chunk_path, concatenate
 
 DEFAULT_TARGET = "English"
-DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_PAGES_PER_CHUNK = 10
 
-# One page of dense body text is ~1.5k output tokens; 16k leaves room for a
-# heavy footnote page without risking the SDK's non-streaming HTTP timeout.
-# Hitting this ceiling is treated as an error, not a result -- see _check().
-MAX_TOKENS = 16000
-
-# Translation is high-volume, low-judgement work: the same instruction applied
-# to page after page. Effort buys nothing here and is charged per page.
-DEFAULT_EFFORT = "low"
+# One page of dense body text is ~1.5k output tokens; 8k leaves room for a heavy
+# footnote page while staying inside the output cap of the smaller free models.
+# Hitting this ceiling is an error, not a result -- see _read().
+MAX_TOKENS = 8000
 
 # Footnote ids ([^p13-1]) and image targets are cross-references, not prose. If
 # the model rewrites one the document still renders -- it just points at the
@@ -258,58 +255,263 @@ def translate_document(
 
 
 # --------------------------------------------------------------------------
-# the Claude backend
+# the backend: any OpenAI-compatible /chat/completions endpoint
 # --------------------------------------------------------------------------
-class ClaudeTranslator:
-    """Translate a page with the Claude API.
+# One request shape covers every free option worth having, which is why this is
+# a single backend rather than one per vendor: a llama.cpp server on this
+# machine, Ollama, and the free tiers of the hosted providers all speak it.
+#
+# Written against urllib rather than a vendor SDK on purpose. It adds no
+# dependency, and the thing that actually needs care here is not the HTTP -- it
+# is the rate limiting, which every free tier does differently and no SDK
+# handles the way a 582-page unattended run needs.
+@dataclass(frozen=True)
+class Provider:
+    name: str
+    base_url: str
+    model: str
+    key_env: str | None = None
+    # Requests per minute to hold to. 0 means unpaced -- correct for a server
+    # running on this machine, where the only cost is the machine's own time.
+    rpm: int = 0
+    note: str = ""
 
-    Credentials are resolved by the SDK (``ANTHROPIC_API_KEY``, or a profile
-    from ``ant auth login``) -- nothing is read or stored here.
 
-    Retries are the SDK's: it already backs off on 429 and 5xx, and a long
-    unattended run wants more of them than the default two.
+PROVIDERS: dict[str, Provider] = {
+    # No account, no key, no network. llama.cpp is already a hard requirement
+    # of this project (marker 2.0 spawns llama-server itself), so the binary is
+    # present on any machine that can run the OCR at all -- but it serves
+    # surya's OCR model, not a translator, so this needs its own server:
+    #   llama-server -hf <a GGUF instruct model> --port 8080
+    "local": Provider(
+        name="local",
+        base_url="http://127.0.0.1:8080/v1",
+        model="local-model",  # llama-server ignores the name and serves what it loaded
+        rpm=0,
+        note="llama-server on this machine; free and offline, costs disk and hours",
+    ),
+    "ollama": Provider(
+        name="ollama",
+        base_url="http://127.0.0.1:11434/v1",
+        model="qwen2.5:7b-instruct",
+        rpm=0,
+        note="Ollama on this machine; free and offline",
+    ),
+    # Free tiers. No money, but a request budget -- hence the pacing.
+    "openrouter": Provider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        model="meta-llama/llama-3.3-70b-instruct:free",
+        key_env="OPENROUTER_API_KEY",
+        rpm=20,
+        note="free models (the ':free' suffix); a free account, no card",
+    ),
+    "groq": Provider(
+        name="groq",
+        base_url="https://api.groq.com/openai/v1",
+        model="llama-3.3-70b-versatile",
+        key_env="GROQ_API_KEY",
+        rpm=25,
+        note="free tier, fastest of these by a distance",
+    ),
+    "gemini": Provider(
+        name="gemini",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        model="gemini-2.5-flash",
+        key_env="GEMINI_API_KEY",
+        rpm=12,
+        note="free tier via Google's OpenAI-compatible endpoint; strongest here on Spanish",
+    ),
+}
+
+DEFAULT_PROVIDER = "openrouter"
+
+
+def resolve_provider(
+    name: str, model: str = "", base_url: str = "", key_env: str | None = None
+) -> Provider:
+    """A preset, with anything the caller named taking precedence.
+
+    Model ids on free tiers come and go, so the preset is a starting point
+    rather than a constraint -- ``--model`` overrides it without needing a code
+    change when one is retired.
     """
+    try:
+        provider = PROVIDERS[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown provider {name!r}; known: {', '.join(sorted(PROVIDERS))}"
+        ) from None
+    return replace(
+        provider,
+        model=model or provider.model,
+        base_url=base_url or provider.base_url,
+        key_env=key_env if key_env is not None else provider.key_env,
+    )
+
+
+def _urllib_transport(url: str, headers: dict, body: bytes, timeout: float):
+    """POST, returning ``(status, payload)`` for any status rather than raising.
+
+    A 429 is data here, not an exception: it carries the Retry-After the caller
+    needs. Injected in tests, which is how the request is inspected without a
+    key and without spending a free tier's budget.
+    """
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        payload = exc.read()
+        # Retry-After rides on the error, so hand it back rather than losing it.
+        retry_after = exc.headers.get("Retry-After") if exc.headers else None
+        return (exc.code, payload, {"Retry-After": retry_after} if retry_after else {})
+    except urllib.error.URLError as exc:
+        raise TranslationError(
+            f"cannot reach {url}: {exc.reason}. For a local provider, is the "
+            "server running? (llama-server ... --port 8080)"
+        ) from exc
+
+
+class OpenAICompatTranslator:
+    """Translate a page through an OpenAI-compatible chat completions endpoint."""
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
-        effort: str = DEFAULT_EFFORT,
+        provider: Provider,
         max_tokens: int = MAX_TOKENS,
-        max_retries: int = 8,
+        temperature: float = 0.2,
+        rpm: int | None = None,
+        max_retries: int = 6,
+        timeout: float = 300.0,
+        transport=None,
     ) -> None:
-        import anthropic
-
-        self.model = model
-        self.effort = effort
+        self.provider = provider
         self.max_tokens = max_tokens
-        self.client = anthropic.Anthropic(max_retries=max_retries)
+        self.temperature = temperature
+        self.rpm = provider.rpm if rpm is None else rpm
+        self.max_retries = max_retries
+        self.timeout = timeout
+        self._transport = transport or _urllib_transport
+        self._last_call = 0.0
         self.input_tokens = 0
         self.output_tokens = 0
 
-    def __call__(self, text: str, target: str) -> str:
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system_prompt(target),
-            output_config={"effort": self.effort},
-            messages=[{"role": "user", "content": text}],
+        self.api_key = ""
+        if provider.key_env:
+            self.api_key = os.environ.get(provider.key_env, "")
+            if not self.api_key:
+                # Fail here rather than on page 1 of 582: the failure is the
+                # same either way, but one of them costs a launch, a wait and a
+                # look at the log to understand.
+                raise TranslationError(
+                    f"{provider.name} needs an API key in ${provider.key_env}. "
+                    "It is free to obtain; export it and re-run."
+                )
+
+    # -- pacing ---------------------------------------------------------
+    def _wait_for_slot(self) -> None:
+        """Hold to the provider's request budget by choice.
+
+        Better to wait three seconds than to be refused and wait sixty: a 429
+        costs the request *and* the backoff, and free tiers count refusals.
+        """
+        if self.rpm <= 0:
+            return
+        interval = 60.0 / self.rpm
+        due = self._last_call + interval
+        now = time.monotonic()
+        if now < due:
+            time.sleep(due - now)
+
+    # -- the request ----------------------------------------------------
+    def _post(self, payload: dict) -> tuple[int, bytes, dict]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        url = self.provider.base_url.rstrip("/") + "/chat/completions"
+        result = self._transport(
+            url, headers, json.dumps(payload).encode(), self.timeout
         )
+        status, body, *rest = result
+        return status, body, (rest[0] if rest else {})
 
-        # Check why it stopped before reading what it said. A truncated page
-        # reads as a complete page -- it just ends early, mid-sentence, and
-        # nothing downstream can tell.
-        if response.stop_reason == "refusal":
-            detail = getattr(response.stop_details, "explanation", "") or ""
-            raise TranslationError(f"model declined this page: {detail}")
-        if response.stop_reason == "max_tokens":
+    def __call__(self, text: str, target: str) -> str:
+        payload = {
+            "model": self.provider.model,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "messages": [
+                {"role": "system", "content": system_prompt(target)},
+                {"role": "user", "content": text},
+            ],
+        }
+
+        last = ""
+        for attempt in range(self.max_retries + 1):
+            self._wait_for_slot()
+            status, body, headers = self._post(payload)
+            self._last_call = time.monotonic()
+
+            if status == 200:
+                return self._read(body)
+
+            last = f"HTTP {status}: {body[:200].decode('utf-8', 'replace')}"
+            # 429 and 5xx are worth waiting out; a 400 (bad model id, bad key)
+            # will fail identically 582 times, so raise it now.
+            if status != 429 and status < 500:
+                raise TranslationError(last)
+            if attempt == self.max_retries:
+                break
+            time.sleep(self._backoff(attempt, headers))
+
+        raise TranslationError(f"giving up after {self.max_retries} retries -- {last}")
+
+    def _backoff(self, attempt: int, headers: dict) -> float:
+        """The server's own number if it gave one, else exponential."""
+        retry_after = (headers or {}).get("Retry-After")
+        if retry_after:
+            try:
+                return min(float(retry_after), 300.0)
+            except (TypeError, ValueError):
+                pass
+        return min(2.0**attempt, 120.0)
+
+    def _read(self, body: bytes) -> str:
+        try:
+            data = json.loads(body)
+        except ValueError as exc:
+            # A proxy, a captive portal or an HTML error page. Saying "not JSON"
+            # points at the right problem; a KeyError would not.
             raise TranslationError(
-                f"page exceeded max_tokens ({self.max_tokens}); the translation "
-                "would be truncated mid-sentence. Raise --max-tokens."
-            )
+                f"response was not JSON: {body[:200].decode('utf-8', 'replace')}"
+            ) from exc
 
-        self.input_tokens += response.usage.input_tokens
-        self.output_tokens += response.usage.output_tokens
-        return "".join(b.text for b in response.content if b.type == "text")
+        try:
+            choice = data["choices"][0]
+            content = choice["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError) as exc:
+            raise TranslationError(f"unexpected response shape: {data}") from exc
+
+        # Truncation reads exactly like a page that ended there, so nothing
+        # downstream can tell. Free-tier models often have small output caps,
+        # which makes this the likeliest silent failure of the whole stage.
+        if choice.get("finish_reason") == "length":
+            raise TranslationError(
+                f"the answer was truncated at max_tokens ({self.max_tokens}); the "
+                "page would end mid-sentence. Raise --max-tokens, or use a "
+                "smaller --pages-per-chunk on a model with a short output cap."
+            )
+        if not content.strip():
+            raise TranslationError("the model returned an empty translation")
+
+        usage = data.get("usage") or {}
+        self.input_tokens += int(usage.get("prompt_tokens") or 0)
+        self.output_tokens += int(usage.get("completion_tokens") or 0)
+        return content
 
 
 def default_out_path(src_md: Path, target: str) -> Path:
@@ -330,9 +532,31 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("src", type=Path, help="Markdown from stage 3")
     ap.add_argument("out", type=Path, nargs="?", help="output (default: SRC.<lang>.md)")
     ap.add_argument("--target", default=DEFAULT_TARGET, help="target language")
-    ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--effort", default=DEFAULT_EFFORT,
-                    choices=["low", "medium", "high", "xhigh", "max"])
+    ap.add_argument(
+        "--provider",
+        default=DEFAULT_PROVIDER,
+        choices=sorted(PROVIDERS),
+        help="; ".join(f"{n}: {p.note}" for n, p in PROVIDERS.items()),
+    )
+    ap.add_argument(
+        "--model",
+        default="",
+        help="override the provider's default model. Free-tier model ids are "
+        "retired regularly, so this is the escape hatch when one stops working",
+    )
+    ap.add_argument("--base-url", default="", help="override the provider's endpoint")
+    ap.add_argument(
+        "--api-key-env",
+        default=None,
+        help="environment variable holding the key (default: the provider's)",
+    )
+    ap.add_argument(
+        "--rpm",
+        type=int,
+        default=None,
+        help="requests per minute to hold to; 0 disables pacing. Defaults to "
+        "the provider's free-tier budget",
+    )
     ap.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
     ap.add_argument("--pages-per-chunk", type=int, default=DEFAULT_PAGES_PER_CHUNK)
     ap.add_argument("--chunk-dir", type=Path, default=None)
@@ -346,9 +570,20 @@ def main(argv: list[str] | None = None) -> int:
     out = args.out or default_out_path(args.src, args.target)
     chunk_dir = args.chunk_dir or args.src.parent / "translation" / "chunks"
 
-    translator = ClaudeTranslator(
-        model=args.model, effort=args.effort, max_tokens=args.max_tokens
-    )
+    try:
+        provider = resolve_provider(
+            args.provider,
+            model=args.model,
+            base_url=args.base_url,
+            key_env=args.api_key_env,
+        )
+        translator = OpenAICompatTranslator(
+            provider, max_tokens=args.max_tokens, rpm=args.rpm
+        )
+    except (ValueError, TranslationError) as exc:
+        print(f"error: {exc}")
+        return 2
+    print(f"{provider.name}: {provider.model} at {provider.base_url}")
     _, stats = translate_document(
         args.src,
         out,

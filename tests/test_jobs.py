@@ -253,14 +253,26 @@ def test_translate_command_carries_the_settings(tmp_path):
         src=str(tmp_path / "book.md"),
         out=str(tmp_path / "book.english.md"),
         target="Indonesian",
-        model="claude-sonnet-5",
+        provider="groq",
+        model="llama-3.3-70b-versatile",
         pages_per_chunk=4,
     )
     cmd = " ".join(spec.command())
     assert "-m bt.translate" in cmd
     assert "--target Indonesian" in cmd
-    assert "--model claude-sonnet-5" in cmd
+    assert "--provider groq" in cmd
+    assert "--model llama-3.3-70b-versatile" in cmd
     assert "--pages-per-chunk 4" in cmd
+
+
+def test_an_unset_model_leaves_the_provider_default_alone(tmp_path):
+    """Free-tier model ids are retired often; the preset is the fallback.
+
+    Passing an empty --model would override the provider's default with
+    nothing, and the request would name a model that does not exist.
+    """
+    spec = jobs.TranslateSpec(src=str(tmp_path / "b.md"), out=str(tmp_path / "o.md"))
+    assert "--model" not in spec.command()
 
 
 def test_translate_status_counts_its_own_chunks_not_the_ocr_chunks(out_dir, make_chunks):

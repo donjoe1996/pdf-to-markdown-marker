@@ -55,6 +55,7 @@ def build_config(
     dpi: int = 300,
     use_llm: bool = False,
     ocr: bool = True,
+    extract_images: bool = False,
 ) -> dict:
     """Config dict for ``ConfigParser``.
 
@@ -65,12 +66,18 @@ def build_config(
     text layer instead of running the vision model, which turns hours into
     seconds. Only correct when that layer is trustworthy -- ``bt.analyze`` makes
     that call. For a scan it would reproduce whatever the old OCR got wrong.
+
+    ``extract_images`` keeps the figures, charts and plates marker detects. Off
+    by default: on a text-only book every extracted "figure" is a false
+    positive costing disk, and the original use here was a philosophy text with
+    none. Turn it on for anything with charts -- the Markdown then carries
+    ``![](images/...)`` links to files written beside it.
     """
     config: dict = {
         "output_format": "markdown",  # ConfigParser KeyErrors without this
         "highres_image_dpi": dpi,
         "paginate_output": True,  # keeps book pages addressable downstream
-        "disable_image_extraction": True,  # -> extract_images=False
+        "disable_image_extraction": not extract_images,
         "mode": mode,
     }
     if ocr:
@@ -110,12 +117,70 @@ def make_converter(config: dict, artifacts: dict):
     )
 
 
-def convert_range(converter, pdf_path: Path) -> str:
+def convert_range(converter, pdf_path: Path) -> tuple[str, dict]:
+    """Markdown for the range, plus the images marker pulled out of it.
+
+    ``images`` is empty unless ``extract_images`` was set in the config; its
+    keys are the filenames the Markdown already links to.
+    """
     from marker.output import text_from_rendered
 
     rendered = converter(str(pdf_path))
-    text, _ext, _images = text_from_rendered(rendered)
-    return text
+    text, _ext, images = text_from_rendered(rendered)
+    return text, images or {}
+
+
+# ``![alt](target)`` -- captured in three parts so only the target is replaced.
+IMAGE_LINK = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)(\s*[^)]*\))")
+
+
+def save_images(images: dict, image_dir: Path, prefix: str) -> dict[str, str]:
+    """Write a chunk's images under names unique to that chunk.
+
+    Returns ``{name marker used: name on disk}``.
+
+    The prefix is not cosmetic. marker numbers pages within the range it was
+    given, so two chunks each offer a ``_page_3_Figure_2.jpeg``. Written under
+    marker's own name the second silently overwrites the first, and both
+    chunks' Markdown then points at the same picture -- the wrong figure on a
+    page that still reads perfectly.
+    """
+    image_dir.mkdir(parents=True, exist_ok=True)
+    mapping: dict[str, str] = {}
+    for name, image in images.items():
+        safe = f"{prefix}_{Path(name).name.lstrip('_')}"
+        path = image_dir / safe
+        # Written to a temp name and renamed, like the chunk files: a run killed
+        # mid-write would otherwise leave a truncated image on disk, which reads
+        # as a figure that exists and cannot be decoded. The temp name keeps the
+        # extension, because PIL picks its format from that.
+        tmp = path.with_name(f".{path.name}")
+        if hasattr(image, "save"):  # PIL image, which is what marker returns
+            image.save(tmp)
+        elif isinstance(image, bytes | bytearray):
+            tmp.write_bytes(image)
+        else:
+            # Loud: a silent skip would leave the Markdown linking to a file
+            # that does not exist, which only shows up when someone reads it.
+            raise TypeError(f"cannot write image {name!r} of type {type(image)}")
+        tmp.replace(path)
+        mapping[name] = safe
+    return mapping
+
+
+def rewrite_image_links(text: str, mapping: dict[str, str], rel_dir: str) -> str:
+    """Point the Markdown's image links at the files that were actually written.
+
+    Links marker did not produce (an absolute URL, say) are left alone.
+    """
+
+    def swap(m: re.Match) -> str:
+        saved = mapping.get(m.group(2))
+        if saved is None:
+            return m.group(0)
+        return f"{m.group(1)}{rel_dir}/{saved}{m.group(3)}"
+
+    return IMAGE_LINK.sub(swap, text)
 
 
 def transcribe(
@@ -129,12 +194,20 @@ def transcribe(
     use_llm: bool = False,
     resume: bool = True,
     ocr: bool = True,
+    extract_images: bool = False,
+    image_dir: Path | None = None,
 ) -> Path:
     """OCR ``pdf_path`` in resumable chunks and concatenate to ``out_md``.
 
     A full run is measured in hours, so each chunk is written as it completes
     and an existing chunk file is skipped on re-run.
+
+    With ``extract_images``, figures are written to ``image_dir`` (by default
+    ``images/`` beside ``out_md``) and the chunk's Markdown is rewritten to
+    link them by their saved names.
     """
+    images_at = image_dir or out_md.parent / "images"
+    rel_dir = images_at.name
     from marker.models import create_model_dict, shutdown_models
 
     chunk_dir.mkdir(parents=True, exist_ok=True)
@@ -144,7 +217,7 @@ def transcribe(
     ]
 
     pending = [
-        (a, b) for a, b in bounds if not (resume and _chunk_path(chunk_dir, a, b).exists())
+        (a, b) for a, b in bounds if not (resume and chunk_path(chunk_dir, a, b).exists())
     ]
     print(
         f"{len(bounds)} chunks of {chunk_size} pages; "
@@ -168,13 +241,25 @@ def transcribe(
                 stopped_early = True
                 break
 
-            target = _chunk_path(chunk_dir, first, last)
+            target = chunk_path(chunk_dir, first, last)
             started = time.time()
             config = build_config(
-                f"{first}-{last}", mode=mode, dpi=dpi, use_llm=use_llm, ocr=ocr
+                f"{first}-{last}",
+                mode=mode,
+                dpi=dpi,
+                use_llm=use_llm,
+                ocr=ocr,
+                extract_images=extract_images,
             )
             converter = make_converter(config, artifacts)
-            text = convert_range(converter, pdf_path)
+            text, images = convert_range(converter, pdf_path)
+            if images:
+                # Images first, then the chunk that links them. An interrupt
+                # between the two leaves orphan image files, which the redone
+                # chunk simply overwrites -- the reverse order would leave
+                # Markdown pointing at files that were never written.
+                mapping = save_images(images, images_at, f"{first:04d}-{last:04d}")
+                text = rewrite_image_links(text, mapping, rel_dir)
             # Write via a temp file and rename: a chunk killed mid-write would
             # otherwise look complete on resume and silently truncate the book.
             tmp = target.with_suffix(".partial")
@@ -194,7 +279,9 @@ def transcribe(
     return concatenate(chunk_dir, out_md, None if stopped_early else bounds)
 
 
-def _chunk_path(chunk_dir: Path, first: int, last: int) -> Path:
+def chunk_path(chunk_dir: Path, first: int, last: int) -> Path:
+    """Chunk filename for a page range. Public: bt.translate names its own
+    chunks the same way, so the format lives in exactly one place."""
     return chunk_dir / f"{first:04d}-{last:04d}.md"
 
 
@@ -209,7 +296,7 @@ def concatenate(
     would concatenate overlapping page ranges into a duplicated book.
     """
     if bounds is not None:
-        chunks = [_chunk_path(chunk_dir, a, b) for a, b in bounds]
+        chunks = [chunk_path(chunk_dir, a, b) for a, b in bounds]
         missing = [p.name for p in chunks if not p.exists()]
         if missing:
             raise RuntimeError(f"missing chunk output: {', '.join(missing)}")
@@ -258,6 +345,12 @@ def main(argv: list[str] | None = None) -> int:
         help="read the existing text layer instead of OCRing (born-digital PDFs "
         "only -- on a scan this reproduces the old OCR's mistakes)",
     )
+    ap.add_argument(
+        "--images",
+        action="store_true",
+        help="extract figures and charts to images/ beside the output, linked "
+        "from the Markdown",
+    )
     args = ap.parse_args(argv)
 
     with pymupdf.open(args.pdf) as doc:
@@ -275,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         use_llm=args.use_llm,
         resume=not args.no_resume,
         ocr=not args.no_ocr,
+        extract_images=args.images,
     )
     return 0
 

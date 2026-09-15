@@ -117,6 +117,7 @@ the same command to pick up where it stopped.
 | `--chunk-size N` | pages per resumable chunk (default 20) |
 | `--no-split` | treat each PDF page as one page (any document not stored as spreads) |
 | `--no-ocr` | read the existing text layer instead of OCRing |
+| `--images` | extract figures and charts to `images/` beside the Markdown, linked from it |
 | `--use-llm` | LLM hybrid mode — mainly helps the polytonic Greek. Needs a key; see marker's docs |
 | `--no-resume` | redo chunks that already exist |
 
@@ -137,12 +138,47 @@ expensive choices are easy to get wrong and costly to undo:
 - **OCR, or read the existing text?** A born-digital PDF extracts in seconds.
   A scan needs OCR — and the giveaway is that its pages are *full-page images*,
   so any text on them came from someone else's OCR, however clean it looks.
+- **Extract figures?** Off by default: on a text-only book every "figure"
+  marker finds is a false positive costing disk. On with charts or plates, the
+  result is a Markdown file plus an `images/` folder it links by name, and the
+  page offers both as a zip so the links still resolve wherever it is opened.
 
 Long runs happen in a detached subprocess, with progress read back from the
 chunk files on disk. You can close the browser, restart the app, or reboot the
 GUI and the run is still there; **Resume** continues from the last finished
 chunk. The app also refuses to start while another pipeline is running
 anywhere on the machine — two at once push it into swap and slow both down.
+
+## Translating the result
+
+```bash
+uv run python -m bt.translate output/NAME/NAME.md --target English
+```
+
+Or the **Translate** panel under Result in the GUI. Optional and separate from
+the pipeline — translating a transcription nobody has looked at only multiplies
+whatever the OCR got wrong, so it is never run automatically.
+
+It works page by page through the Claude API (`ANTHROPIC_API_KEY`, or a profile
+from `ant auth login`), and is resumable the same way transcription is: each
+chunk of pages is written atomically and skipped on re-run, so a rate limit at
+page 300 costs the current chunk and nothing else. The source language is
+detected by the model; `--target` takes any language, not just English.
+
+The page anchors are **never sent to the model**. They are stripped before the
+request and re-attached afterwards, so a page cannot be renumbered or lost — a
+model told to "preserve" them would drop one eventually, and the translation
+would still read perfectly while the alignment to the PDF quietly broke.
+Footnote ids and image links do travel inside the prose, so they are compared
+before and after instead, and every page where one changed is reported.
+
+| Flag | Effect |
+|---|---|
+| `--target LANG` | target language (default English) |
+| `--model ID` | default `claude-opus-5`; Sonnet and Haiku cost less per page |
+| `--pages-per-chunk N` | pages per resumable chunk (default 10) |
+| `--effort LEVEL` | default `low` — translation is high-volume, low-judgement work |
+| `--no-resume` | redo chunks that already exist |
 
 ## Keeping the machine busy — the queue worker
 
@@ -306,3 +342,9 @@ documents legitimately have none.
 - The two footnote series (arabic = translators', roman = Heidegger's
   marginalia) are namespaced per page but not separated by series.
 - PyMuPDF is AGPL-licensed — fine for local use, relevant if redistributed.
+- **Figure extraction is marker's**, so what counts as a figure is its call; the
+  pipeline only names the files safely and keeps the links pointing at them.
+- **Translation sends the text to the Anthropic API** and costs roughly one
+  request per page. It is checked for structural damage (lost pages, drifted
+  footnote ids), not for accuracy — nothing here verifies the translation is
+  *right*.

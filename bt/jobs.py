@@ -27,6 +27,14 @@ from pathlib import Path
 LOCK_NAME = ".run.lock"
 LOG_NAME = "run.log"
 
+# Translation is a separate job with its own lock, log and chunk directory. It
+# is network-bound rather than memory-bound, so it deliberately does NOT count
+# as a pipeline process: blocking an OCR run because a translation is in flight
+# would be wrong, and the two can share the machine.
+TRANSLATE_LOCK = ".translate.lock"
+TRANSLATE_LOG = "translate.log"
+TRANSLATE_DIR = "translation"
+
 # `python -m bt.run …` / `python -m bt.transcribe …`, however it was launched.
 PIPELINE_CMD = re.compile(r"-m\s+bt\.(run|transcribe)\b")
 
@@ -42,6 +50,7 @@ class JobSpec:
     mode: str = "fast"
     pages: str | None = None
     total_pages: int = 0  # pages after splitting; drives the progress bar
+    images: bool = False
 
     def command(self) -> list[str]:
         cmd = [
@@ -59,6 +68,8 @@ class JobSpec:
             cmd.append("--no-ocr")
         if self.pages:
             cmd += ["--pages", self.pages]
+        if self.images:
+            cmd.append("--images")
         return cmd
 
 
@@ -326,30 +337,29 @@ def start(spec: JobSpec) -> JobStatus:
     return status(spec.out_dir)
 
 
-def status(out_dir: str | Path) -> JobStatus:
-    """Current state, reconstructed entirely from disk."""
-    out = Path(out_dir)
+def _read_status(lock: Path, log: Path, chunk_dir: Path, spec_type) -> JobStatus:
+    """Reconstruct a job's state from its lock, log and chunk directory.
+
+    Shared by the OCR pipeline and the translator because they record progress
+    the same way -- atomically written chunk files -- and differ only in where
+    those files live.
+    """
     st = JobStatus()
 
-    lock = lock_path(out)
     if lock.exists():
         try:
             data = json.loads(lock.read_text(encoding="utf-8"))
             st.pid = data.get("pid")
             st.started_at = data.get("started", 0.0)
-            st.spec = JobSpec(**data["spec"]) if data.get("spec") else None
+            st.spec = spec_type(**data["spec"]) if data.get("spec") else None
         except (ValueError, KeyError, TypeError):
             st.spec = None
     if st.pid:
         st.running = _alive(st.pid)
 
-    chunk_dir = out / "chunks"
     if chunk_dir.is_dir():
         st.chunks_done = len(list(chunk_dir.glob("[0-9]*-[0-9]*.md")))
-    if st.spec and st.spec.total_pages and st.spec.chunk_size:
-        st.chunks_total = -(-st.spec.total_pages // st.spec.chunk_size)  # ceil
 
-    log = log_path(out)
     if log.exists():
         tail = log.read_bytes()[-8000:].decode("utf-8", "replace")
         lines = [ln for ln in tail.replace("\r", "\n").split("\n") if ln.strip()]
@@ -357,6 +367,100 @@ def status(out_dir: str | Path) -> JobStatus:
         st.stopped_early = any("STOPPING" in ln for ln in lines)
         st.finished = (not st.running) and any("Concatenated" in ln for ln in lines)
     return st
+
+
+def status(out_dir: str | Path) -> JobStatus:
+    """Current state of the OCR pipeline, reconstructed entirely from disk."""
+    out = Path(out_dir)
+    st = _read_status(lock_path(out), log_path(out), out / "chunks", JobSpec)
+    if st.spec and st.spec.total_pages and st.spec.chunk_size:
+        st.chunks_total = -(-st.spec.total_pages // st.spec.chunk_size)  # ceil
+    return st
+
+
+# --------------------------------------------------------------------------
+# translation: the same launch-and-watch shape, a separate job
+# --------------------------------------------------------------------------
+@dataclass
+class TranslateSpec:
+    src: str
+    out: str
+    target: str = "English"
+    model: str = "claude-opus-5"
+    pages_per_chunk: int = 10
+    total_pages: int = 0  # pages in the source markdown; drives the progress bar
+
+    @property
+    def chunk_dir(self) -> Path:
+        return Path(self.src).parent / TRANSLATE_DIR / "chunks"
+
+    def command(self) -> list[str]:
+        return [
+            sys.executable, "-u", "-m", "bt.translate",
+            self.src, self.out,
+            "--target", self.target,
+            "--model", self.model,
+            "--pages-per-chunk", str(self.pages_per_chunk),
+            "--chunk-dir", str(self.chunk_dir),
+        ]
+
+
+def translate_lock_path(out_dir: str | Path) -> Path:
+    return Path(out_dir) / TRANSLATE_LOCK
+
+
+def translate_log_path(out_dir: str | Path) -> Path:
+    return Path(out_dir) / TRANSLATE_LOG
+
+
+def translate_status(out_dir: str | Path) -> JobStatus:
+    """Translation progress, read from its own chunk directory.
+
+    Deliberately not ``out_dir/chunks``: ``queue.survey()`` judges a book
+    finished by counting files there, so a translation chunk landing in it
+    would make a half-transcribed book look complete and the worker would move
+    on for good.
+    """
+    out = Path(out_dir)
+    st = _read_status(
+        translate_lock_path(out),
+        translate_log_path(out),
+        out / TRANSLATE_DIR / "chunks",
+        TranslateSpec,
+    )
+    if st.spec and st.spec.total_pages and st.spec.pages_per_chunk:
+        st.chunks_total = -(-st.spec.total_pages // st.spec.pages_per_chunk)
+    return st
+
+
+def start_translate(spec: TranslateSpec, out_dir: str | Path) -> JobStatus:
+    """Launch the translator detached, as ``start()`` does for the pipeline.
+
+    Same reasoning: Streamlit re-runs its script on every interaction, and a
+    book takes hours. Refuses only a second translation of the *same* document
+    -- an OCR run elsewhere on the machine is no obstacle, since this job is
+    waiting on the network rather than holding the memory.
+    """
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    current = translate_status(out)
+    if current.running:
+        raise RuntimeError(f"a translation is already running (pid {current.pid})")
+
+    log = translate_log_path(out).open("ab")
+    proc = subprocess.Popen(
+        spec.command(),
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        cwd=Path(__file__).resolve().parent.parent,
+        start_new_session=True,
+    )
+    translate_lock_path(out).write_text(
+        json.dumps({"pid": proc.pid, "started": time.time(), "spec": asdict(spec)}),
+        encoding="utf-8",
+    )
+    return translate_status(out)
 
 
 def stop(out_dir: str | Path) -> bool:

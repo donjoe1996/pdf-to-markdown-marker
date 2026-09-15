@@ -48,6 +48,13 @@ def main(argv: list[str] | None = None) -> int:
         "only -- on a scan this reproduces the old OCR's mistakes)",
     )
     ap.add_argument(
+        "--images",
+        action="store_true",
+        help="extract figures and charts to images/ beside the Markdown, linked "
+        "from it. Off by default: on a text-only book every 'figure' marker "
+        "finds is a false positive costing disk",
+    )
+    ap.add_argument(
         "--split-only", action="store_true", help="stop after stage 1 (no models needed)"
     )
     ap.add_argument("--skip-preflight", action="store_true")
@@ -125,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
         use_llm=args.use_llm,
         resume=not args.no_resume,
         ocr=not args.no_ocr,
+        extract_images=args.images,
+        image_dir=out_dir / "images",
     )
 
     # -- Stage 3: cleanup -------------------------------------------------

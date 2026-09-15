@@ -16,7 +16,7 @@ import time
 import pytest
 
 from bt import jobs
-from bt.jobs import PIPELINE_CMD, JobSpec, parse_command
+from bt.jobs import PIPELINE_CMD, JobSpec, parse_command  # noqa: F401
 
 
 # --------------------------------------------------------------------------
@@ -230,3 +230,56 @@ def test_status_counts_chunks_and_reads_the_spec(out_dir, write_lock, make_chunk
     assert st.chunks_total == 4  # 40 pages / chunk_size 10
     assert st.running is False  # the pid is dead
     assert st.fraction == 0.5
+
+
+# --------------------------------------------------------------------------
+# the translation job
+# --------------------------------------------------------------------------
+def test_translation_is_not_mistaken_for_a_pipeline_process():
+    """`bt.translate` shares a prefix with `bt.transcribe`; it must not match.
+
+    PIPELINE_CMD gates whether an OCR run may start. If a translation counted
+    as a pipeline process, the GUI and the worker would both refuse to start
+    OCR while one was in flight -- and a translation runs for hours. The
+    reverse matters too: translation is network-bound, so it does not need the
+    machine's memory and has no business holding that lock.
+    """
+    assert not PIPELINE_CMD.search("python -u -m bt.translate output/book/book.md")
+    assert PIPELINE_CMD.search("python -u -m bt.transcribe pages.pdf raw.md")
+
+
+def test_translate_command_carries_the_settings(tmp_path):
+    spec = jobs.TranslateSpec(
+        src=str(tmp_path / "book.md"),
+        out=str(tmp_path / "book.english.md"),
+        target="Indonesian",
+        model="claude-sonnet-5",
+        pages_per_chunk=4,
+    )
+    cmd = " ".join(spec.command())
+    assert "-m bt.translate" in cmd
+    assert "--target Indonesian" in cmd
+    assert "--model claude-sonnet-5" in cmd
+    assert "--pages-per-chunk 4" in cmd
+
+
+def test_translate_status_counts_its_own_chunks_not_the_ocr_chunks(out_dir, make_chunks):
+    """The two chunk directories must never be confused for one another.
+
+    `queue.survey()` judges a book finished by counting `chunks/`. Translation
+    chunks landing there would make a half-transcribed book look done, and the
+    worker would move on and never come back to it.
+    """
+    make_chunks(out_dir, [(0, 9)])  # OCR chunks
+    tchunks = out_dir / jobs.TRANSLATE_DIR / "chunks"
+    tchunks.mkdir(parents=True)
+    for name in ("0000-0009.md", "0010-0019.md"):
+        (tchunks / name).write_text("translated", encoding="utf-8")
+
+    assert jobs.status(out_dir).chunks_done == 1
+    assert jobs.translate_status(out_dir).chunks_done == 2
+
+
+def test_translate_status_is_not_running_without_a_lock(out_dir):
+    st = jobs.translate_status(out_dir)
+    assert st.running is False and st.chunks_done == 0

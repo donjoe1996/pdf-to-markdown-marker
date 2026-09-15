@@ -28,6 +28,9 @@ uv run bt-transcribe --pdf FILE.pdf --split-only    # stage 1 only; no models ne
 uv run bt-transcribe --pdf FILE.pdf --no-split --no-ocr   # single pages, text-layer extract
 uv run python -m bt.verify output/NAME/NAME.md
 uv run python -m bt.postprocess output/NAME/raw.md --report  # tune transforms, write nothing
+
+uv run bt-transcribe --pdf FILE.pdf --images            # keep figures/charts too
+uv run python -m bt.translate output/NAME/NAME.md --target English   # optional stage 4
 ```
 
 **`--pdf` is required** — there is no default document any more.
@@ -57,7 +60,7 @@ edit is made.
 
 ```bash
 uv run ruff check .          # layer 0: undefined names, unused imports (~1s)
-uv run pytest                # fast suite, ~1s, 79 tests
+uv run pytest                # fast suite, ~2s, 127 tests
 uv run pytest -m slow        # Streamlit smoke tests (boot the app; ~1 min locally)
 uv run pytest -m ""          # everything, as CI runs it
 uv run pytest --golden-update   # rewrite golden files -- review the diff
@@ -133,6 +136,7 @@ at.selectbox[0].set_value("meditationsofmar00marc.pdf").run()
 | 2a | `warmup.py` | Pre-download every model before any timed spawn |
 | 2b | `transcribe.py` | Chunked, resumable OCR via marker |
 | 3 | `postprocess.py` | Strip heads, namespace footnotes, dehyphenate |
+| 4 | `translate.py` | **Optional.** Translate the finished Markdown via the Claude API |
 | — | `verify.py` | Quality checks on the finished Markdown |
 
 `transcribe.py` and `warmup.py` set env vars **at import time, before torch is
@@ -205,6 +209,20 @@ the most important check into a no-op: it reported "ok / no meaningful embedded
 text" for a whole 256-page book — a pass that proved nothing. Anchors also cost
 cross-page hyphen joins (6 in that book), since the anchor now sits between the
 split halves.
+
+**Image links must survive running-head removal.** `_could_be_head()` rejects any
+line containing `](`. Extracted figures are named by page and figure number, so
+`images/0000-0009_page_3_Figure_2.jpeg` normalises to exactly the same form as
+every other figure's link — a book with a chart on most pages had every one of
+them deleted as a running head, leaving text that still read perfectly with the
+pictures silently gone.
+
+**Extracted images are namespaced by chunk.** marker numbers pages *within the
+range it was given*, so two chunks each hand back a `_page_3_Figure_2.jpeg`.
+Saved under marker's own name the second overwrites the first and both chunks'
+Markdown then points at the same picture. `save_images()` prefixes the chunk
+bounds and rewrites the links; writes are atomic (temp name, same extension,
+then rename) for the same reason chunk writes are.
 
 **Footnote ids must be namespaced per page.** Footnote "1" recurs on nearly every
 page; un-namespaced ids would collide hundreds of times in one document.
@@ -285,6 +303,43 @@ not exist. `bt.worker` and `bt.queue` deliberately do not match.
 `queue.resolve_out_dir()` is the single source of truth for where a document's
 chunks live; `app.py` uses it too, so the GUI and worker cannot disagree and
 resume one book onto another's output.
+
+## Translation (`bt/translate.py`) — optional stage 4
+
+`uv run python -m bt.translate output/NAME/NAME.md --target English`, or the
+**Translate** panel under Result in the GUI. Not part of `bt.run` and not
+something the worker does: translating a transcription you have not looked at
+only multiplies whatever the OCR got wrong.
+
+**The page anchors never reach the model.** They are stripped before the request
+and re-emitted here, exactly as `postprocess.process()` does. A model told to
+"preserve" `<!-- page N -->` would drop one eventually and nothing would look
+wrong — the translation would still read perfectly while page alignment quietly
+lost a page, which is the same failure that once turned
+`verify.check_not_embedded_layer` into a no-op. One page in, one page out, by
+construction.
+
+**Footnote ids and image links are checked, not trusted.** They *are* sent (they
+sit inside the prose), so `markup_signature()` compares them before and after
+and `Stats.markup_drift` names every page where they changed. A renumbered
+footnote still renders; it just points at the wrong note.
+
+**Chunks are the progress record**, as in `transcribe.py` — same atomic write,
+same resume, same `concatenate()` bounds guard. A failure stops the run rather
+than skipping the chunk: a skipped chunk leaves a hole resume cannot see, and
+the book would look finished with a missing stretch in the middle.
+
+**It is a separate job from the pipeline.** Its own lock (`.translate.lock`),
+log, and chunk directory (`translation/chunks/`, never `chunks/` — `queue.survey()`
+counts files there to decide a book is done). `PIPELINE_CMD` deliberately does
+not match `bt.translate`: translation waits on the network, not on memory, so it
+neither needs nor should hold the one-OCR-at-a-time lock.
+
+Defaults: `claude-opus-5` at `effort="low"` (high-volume, low-judgement work —
+effort is charged per page and buys nothing here), one request per page, blank
+pages skipped. `stop_reason` is checked before the text is read: a `max_tokens`
+truncation is an error, because a page cut off mid-sentence reads exactly like a
+page that ended there.
 
 ## Running on a GPU (Colab)
 

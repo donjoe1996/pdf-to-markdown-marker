@@ -41,40 +41,45 @@ def test_app_runs_without_exception(app):
 
 
 def has_documents(at) -> bool:
-    return any(o.endswith(".pdf") for o in at.selectbox[0].options)
+    """Whether the picker offers any document.
+
+    Addressed through the sidebar rather than by global index: the result page
+    adds selectboxes of its own, so `at.selectbox[0]` is not stable.
+    """
+    return any(o.endswith(".pdf") for o in at.sidebar.selectbox[0].options)
 
 
-def test_queue_panel_is_present(app):
+def test_queue_panel_is_present(make_pdf):
     """The queue is how the unattended worker is understood from the GUI.
 
     Only rendered once a document is selected: with an empty library the script
     stops early, which is the correct behaviour and is covered separately below.
     """
-    if not has_documents(app):
-        pytest.skip("no documents; the empty-library path is tested separately")
-    assert "Queue" in [s.value for s in app.subheader]
+    make_pdf("queued.pdf", pages=1)
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    at.run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert "Queue" in [s.value for s in at.subheader]
 
 
 def test_empty_library_degrades_gracefully(app):
-    """CI runs with no PDFs at all, since they are gitignored.
+    """A library with no PDFs at all -- the state every new install starts in.
 
-    That is a path a local run never takes, so it is worth pinning: the app must
-    explain itself rather than render a broken half-page or raise.
+    The app must explain itself rather than render a broken half-page or raise.
     """
-    if has_documents(app):
-        pytest.skip("library is not empty here; CI covers this path")
+    assert not has_documents(app)
     assert not app.exception
     assert any("Choose a PDF" in i.value for i in app.info)
-    assert any("Upload" in o for o in app.selectbox[0].options)
+    assert any("Upload" in o for o in app.sidebar.selectbox[0].options)
 
 
 def test_document_picker_offers_upload(app):
     """A document can always be added, even with none on disk."""
-    options = app.selectbox[0].options
+    options = app.sidebar.selectbox[0].options
     assert any("Upload" in o for o in options)
 
 
-def test_worker_button_starts_and_echoes_the_command(monkeypatch):
+def test_worker_button_starts_and_echoes_the_command(monkeypatch, make_pdf):
     """The start button shows what it ran, so a click is never a mystery.
 
     ``start_worker`` is stubbed: a real one would launch ``bt.worker`` against
@@ -84,10 +89,9 @@ def test_worker_button_starts_and_echoes_the_command(monkeypatch):
 
     calls = []
     monkeypatch.setattr(jobs, "start_worker", lambda: calls.append(1) or jobs.worker_command())
+    make_pdf("worker.pdf", pages=1)
     at = AppTest.from_file(APP, default_timeout=TIMEOUT)
     at.run()
-    if not has_documents(at):
-        pytest.skip("the queue panel needs a document")
 
     start = next(b for b in at.button if b.label == "Start worker")
     start.click().run()
@@ -96,10 +100,126 @@ def test_worker_button_starts_and_echoes_the_command(monkeypatch):
     assert any("-m bt.worker" in c.value for c in at.code)
 
 
-def test_switching_document_does_not_raise(app):
+def test_switching_document_does_not_raise(make_pdf):
     """Changing the selection re-runs the whole script, analysis included."""
-    pdfs = [o for o in app.selectbox[0].options if o.endswith(".pdf")]
-    if not pdfs:
-        pytest.skip("no PDFs available to select")
-    app.selectbox[0].set_value(pdfs[0]).run()
-    assert not app.exception, [str(e.value) for e in app.exception]
+    make_pdf("first.pdf", pages=1)
+    make_pdf("second.pdf", pages=1)
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    at.run()
+    at.sidebar.selectbox[0].set_value("second.pdf").run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+
+
+# --------------------------------------------------------------------------
+# the result page: figures, and the translate panel
+# --------------------------------------------------------------------------
+def _write_png(path: Path) -> None:
+    """A real 1x1 PNG -- Streamlit decodes what it renders."""
+    import pymupdf
+
+    pixmap = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 1, 1), False)
+    path.write_bytes(pixmap.tobytes("png"))
+
+
+@pytest.fixture
+def finished_book(tmp_path, make_pdf):
+    """A document with output already on disk, as after a completed run.
+
+    Discovery goes through ``bt.queue``, which conftest's autouse ``isolate``
+    fixture points at tmp_path -- so this builds a whole library without
+    touching the real one, where a running worker would otherwise pick the
+    fixture up and start transcribing it.
+    """
+    pdf = make_pdf("book.pdf", pages=2)
+    out = tmp_path / "output" / "book"
+    (out / "chunks").mkdir(parents=True)
+    (out / "book.md").write_text(
+        "<!-- page 0 -->\n\nUna página en español.\n\n"
+        "![](images/0000-0009_page_0_Figure_1.jpeg)\n\n"
+        "<!-- page 1 -->\n\nOtra página.\n",
+        encoding="utf-8",
+    )
+    images = out / "images"
+    images.mkdir()
+    _write_png(images / "0000-0009_page_0_Figure_1.jpeg")
+    return pdf, out
+
+
+def _open(at, pdf):
+    at.run()
+    at.sidebar.selectbox[0].set_value(pdf.name).run()
+    return at
+
+
+def test_result_and_translate_sections_render(finished_book):
+    """Everything below "Result" only exists once a run has produced output.
+
+    With no PDFs in the repo the other smoke tests skip before reaching it, so
+    this half of the page was never executed -- and AppTest is the only thing
+    that catches a NameError in a branch the happy path never takes.
+    """
+    pdf, _ = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    headings = [s.value for s in at.subheader]
+    assert "Result" in headings and "Translate" in headings
+    assert any("Figures" in e.label for e in at.expander)
+
+
+def test_translate_button_launches_a_detached_job(finished_book, monkeypatch):
+    """The click must hand a spec to jobs, not translate inside the app.
+
+    ``start_translate`` is stubbed: a real one would spend hours and money.
+    """
+    from bt import jobs
+
+    pdf, out = finished_book
+    launched = []
+    monkeypatch.setattr(
+        jobs,
+        "start_translate",
+        lambda spec, folder: launched.append((spec, folder)) or jobs.JobStatus(),
+    )
+
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    button = next(b for b in at.button if b.label.startswith("Translate to"))
+    button.click().run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert len(launched) == 1
+    spec, folder = launched[0]
+    assert spec.src.endswith("book.md")
+    assert spec.target == "English"
+    assert Path(folder) == out
+    # Its chunks must not land in the OCR chunk directory: queue.survey() counts
+    # files there to decide a book is finished.
+    assert spec.chunk_dir != out / "chunks"
+
+
+def test_an_output_folder_outside_the_project_does_not_crash(finished_book, tmp_path):
+    """REGRESSION: the Result caption used a strict relative_to().
+
+    Pointing "Output folder" at an absolute path elsewhere raised ValueError
+    and took the whole page down.
+    """
+    pdf, out = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    at.sidebar.text_input[0].set_value(str(out)).run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+
+
+def test_a_corrupt_figure_does_not_take_the_page_down(finished_book):
+    """An image that cannot be decoded is a damaged file, not a page error.
+
+    Streamlit raises UnidentifiedImageError from st.image, which would abort
+    the whole script -- losing the Result section, the download button and the
+    translate panel over one bad figure.
+    """
+    pdf, out = finished_book
+    (out / "images" / "0000-0009_page_1_Figure_9.jpeg").write_bytes(b"not an image")
+
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert any("could not be read" in w.value for w in at.warning)
+

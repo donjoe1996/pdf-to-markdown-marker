@@ -189,3 +189,23 @@ def test_margin_numbers_off_by_default(book_markdown):
     """marker discards marginal numbers, so the transform is a no-op here."""
     _, stats = process(book_markdown(4))
     assert stats.margins_converted == 0
+
+
+def test_image_links_are_not_stripped_as_running_heads():
+    """A figure on most pages normalises to the same line on every page.
+
+    Running-head removal works by repetition with digits normalised away, and
+    `images/0000-0009_page_3_Figure_2.jpeg` collapses to the same form as
+    `images/0010-0019_page_7_Figure_1.jpeg`. A book with a chart on most pages
+    would have every one of its figures deleted -- the text would still read
+    perfectly, with the pictures silently gone.
+    """
+    pages = [
+        f"![](images/{i:04d}-{i:04d}_page_{i}_Figure_{i}.jpeg)\n\n"
+        f"Body text unique to page {i}, long enough to read as a sentence.\n"
+        for i in range(8)
+    ]
+    out, stats = process(marker_markdown(pages))
+
+    assert out.count("![](images/") == 8
+    assert stats.heads_removed == 0

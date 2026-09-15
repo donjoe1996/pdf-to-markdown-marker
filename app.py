@@ -10,7 +10,10 @@ run. See bt/jobs.py for why that matters.
 
 from __future__ import annotations
 
+import io
+import os
 import shlex
+import zipfile
 from pathlib import Path
 
 import pymupdf
@@ -23,6 +26,18 @@ from bt.split_spreads import _ink_profile, find_gutter
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = ROOT / "output"
+
+
+def shown(path: Path, base: Path) -> str:
+    """Path relative to the project when it lives there, in full when it does not.
+
+    ``relative_to`` is strict, and an unhandled ValueError here takes down the
+    whole page -- which is what an output folder outside the project used to do.
+    """
+    try:
+        return str(Path(path).relative_to(base))
+    except ValueError:
+        return str(path)
 
 st.set_page_config(page_title="PDF → Markdown", page_icon="📄", layout="wide")
 
@@ -63,6 +78,33 @@ def render_halves(path: str, index: int, dpi: int, mtime: float):
     return left, right, gutter, band
 
 
+@st.cache_data(show_spinner="Building bundle…")
+def bundle_zip(md_path: str, image_paths: tuple[str, ...]) -> bytes:
+    """Markdown plus its images, laid out so the links still resolve.
+
+    Keyed on the file list rather than the folder so a new figure invalidates
+    it; the zip is rebuilt, not served stale.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(md_path, Path(md_path).name)
+        for image in image_paths:
+            zf.write(image, f"images/{Path(image).name}")
+    return buf.getvalue()
+
+
+def has_anthropic_credentials() -> bool:
+    """Whether the SDK will find a credential without being handed one.
+
+    It resolves an API key from the environment or a profile written by
+    ``ant auth login``; nothing is read or stored here, so this only decides
+    whether to warn before a long job fails on its first request.
+    """
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        return True
+    return (Path.home() / ".config" / "anthropic").exists()
+
+
 def human_time(seconds: float) -> str:
     if seconds < 90:
         return f"{seconds:.0f}s"
@@ -71,28 +113,21 @@ def human_time(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-def find_pdfs() -> list[Path]:
-    """PDFs in the project root and in uploads/.
-
-    Uploaded files are saved to uploads/ so they survive a reload -- without
-    listing that folder they would disappear from the picker as soon as the
-    uploader widget cleared, stranding work already done on them.
-    """
-    found = list(ROOT.glob("*.pdf")) + list((ROOT / "uploads").glob("*.pdf"))
-    return sorted(
-        (p for p in found if not p.name.startswith(".")), key=lambda p: p.name.lower()
-    )
-
-
 # --------------------------------------------------------------------------
 # sidebar: choose a document
 # --------------------------------------------------------------------------
 st.sidebar.title("📄 PDF → Markdown")
 
-pdfs = find_pdfs()
-# Label by path relative to the project, not bare filename: uploads/ files live
+# Discovery lives in bt.queue so the GUI and the unattended worker cannot
+# disagree about what the library holds -- app.py had a second copy of the same
+# glob. Uploaded files are listed because they are saved under uploads/; without
+# that they would vanish from the picker the moment the uploader cleared,
+# stranding work already done on them.
+LIBRARY = bt_queue.ROOT
+pdfs = bt_queue.discover()
+# Label by path relative to the library, not bare filename: uploads/ files live
 # in a subfolder, and resolving a bare name against the root would miss them.
-by_label = {str(p.relative_to(ROOT)): p for p in pdfs}
+by_label = {shown(p, LIBRARY): p for p in pdfs}
 labels = list(by_label) + ["Upload a file…"]
 choice = st.sidebar.selectbox("Document", labels, index=0 if pdfs else len(labels) - 1)
 
@@ -100,7 +135,7 @@ pdf_path: Path | None = None
 if choice == "Upload a file…":
     up = st.sidebar.file_uploader("Choose a PDF", type="pdf")
     if up is not None:
-        dest = ROOT / "uploads" / up.name
+        dest = LIBRARY / "uploads" / up.name
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists() or dest.stat().st_size != up.size:
             dest.write_bytes(up.getbuffer())
@@ -122,14 +157,7 @@ st.sidebar.caption(f"{stat.st_size / 1e6:.1f} MB")
 default_out = bt_queue.resolve_out_dir(pdf_path)
 chunks_in = bt_queue.chunks_in
 
-# Shown relative to the project when it lives there, which is the normal case
-# and much easier to read. An output folder elsewhere is shown in full rather
-# than raising -- relative_to() is strict, and an unhandled ValueError here
-# takes down the whole page.
-try:
-    default_label = str(default_out.relative_to(ROOT))
-except ValueError:
-    default_label = str(default_out)
+default_label = shown(default_out, LIBRARY)
 
 out_text = st.sidebar.text_input(
     "Output folder",
@@ -137,7 +165,7 @@ out_text = st.sidebar.text_input(
     help="Holds chunks/, raw.md and the final Markdown. Point it at an existing "
     "folder to resume that run.",
 )
-out_dir = Path(out_text) if Path(out_text).is_absolute() else ROOT / out_text
+out_dir = Path(out_text) if Path(out_text).is_absolute() else LIBRARY / out_text
 existing_chunks = chunks_in(out_dir)
 if existing_chunks:
     st.sidebar.success(f"{existing_chunks} chunks already done here", icon=":material/history:")
@@ -194,10 +222,7 @@ else:
 
 # The worker is detached, so the button only sends a command; the page state
 # still comes from disk. The command is echoed so a click is never a mystery.
-try:
-    worker_log = str(jobs.worker_log_path().relative_to(ROOT))
-except ValueError:
-    worker_log = str(jobs.worker_log_path())
+worker_log = shown(jobs.worker_log_path(), ROOT)
 start_preview = shlex.join(jobs.worker_command()) + f" >> {worker_log} 2>&1 &"
 
 worker_row = st.container(horizontal=True, vertical_alignment="center")
@@ -330,12 +355,19 @@ ocr = s2.checkbox(
     help="Off reads the PDF's existing text layer instead — seconds rather than "
     "hours, but only right when that layer is trustworthy.",
 )
-dpi = s3.select_slider("DPI", [150, 192, 300, 400], value=300,
+images = s3.checkbox(
+    "Extract figures",
+    value=False,
+    help="Saves charts, plates and figures to images/ beside the Markdown and "
+    "links them from it. On a text-only book every 'figure' found is a false "
+    "positive costing disk, so this is off unless the document has them.",
+)
+a1, a2, a3 = st.columns(3)
+dpi = a1.select_slider("DPI", [150, 192, 300, 400], value=300,
                        help="Does not change speed — the cost is tokens generated, not pixels read.")
-a1, a2 = st.columns(2)
-chunk_size = a1.number_input("Pages per chunk", 1, 100, 10,
+chunk_size = a2.number_input("Pages per chunk", 1, 100, 10,
                              help="Smaller chunks resume more finely and check disk more often.")
-pages = a2.text_input("Page range (optional)", "", placeholder="e.g. 0-9 or 8,40-41")
+pages = a3.text_input("Page range (optional)", "", placeholder="e.g. 0-9 or 8,40-41")
 
 if not ocr and info.recommend_ocr:
     st.warning(
@@ -354,7 +386,12 @@ if split and not info.is_spread:
 st.subheader("Preview")
 # Default to the middle of the document: front matter is often blank or a
 # title page, which tells you nothing about whether the settings are right.
-idx = st.slider("Page", 0, max(0, info.pages - 1), max(0, info.pages // 2))
+if info.pages > 1:
+    idx = st.slider("Page", 0, info.pages - 1, info.pages // 2)
+else:
+    # st.slider raises when min == max, which took the whole page down on any
+    # one-page document -- there is nothing to choose between, so do not ask.
+    idx = 0
 if split:
     left, right, gutter, band = render_halves(str(pdf_path), idx, 110, stat.st_mtime)
     st.caption(f"Cut at {gutter:.1%} of width (blank band {band:.1%} wide)")
@@ -396,6 +433,7 @@ spec = jobs.JobSpec(
     chunk_size=int(chunk_size),
     pages=pages.strip() or None,
     total_pages=total_pages,
+    images=images,
 )
 
 b1, b2, _ = st.columns([1, 1, 3])
@@ -467,6 +505,52 @@ def spec_total_chunks() -> int:
     return -(-total_pages // int(chunk_size)) if chunk_size else 0
 
 
+@st.fragment(run_every=5)
+def translation_panel(folder: Path, translated_md: Path) -> None:
+    """Translation progress and result, re-read from disk like the OCR panel.
+
+    Same reasoning as ``progress_panel``: the job is detached, so the page owns
+    no state and a reload costs nothing.
+    """
+    live = jobs.translate_status(folder)
+
+    if live.running or live.chunks_done:
+        done, total = live.chunks_done, live.chunks_total
+        st.progress(
+            min(1.0, done / total) if total else 0.0,
+            text=f"{done}/{total or '?'} chunks",
+        )
+        st.caption(
+            f"{'running' if live.running else 'stopped'} · "
+            f"{human_time(live.elapsed)} elapsed"
+        )
+
+    if live.stopped_early and not live.running:
+        st.warning(
+            "Stopped part-way through — the log below says why. Press **Resume** "
+            "to carry on; finished chunks are kept.",
+            icon=":material/pause_circle:",
+        )
+
+    if live.last_lines:
+        with st.expander("Translation log", expanded=live.running):
+            st.code("\n".join(live.last_lines), language="text")
+
+    if translated_md.exists():
+        body = translated_md.read_text(encoding="utf-8", errors="replace")
+        st.caption(f"`{translated_md.name}` · {len(body):,} characters")
+        st.download_button(
+            "Download translation",
+            body,
+            file_name=translated_md.name,
+            mime="text/markdown",
+            icon=":material/download:",
+            key="download-translation",
+        )
+        with st.expander("Preview translation"):
+            st.text(body[:4000] + ("\n\n… truncated" if len(body) > 4000 else ""))
+
+
 progress_panel()
 
 # --------------------------------------------------------------------------
@@ -479,7 +563,7 @@ result = final_md if final_md.exists() else raw_md
 if result.exists():
     st.subheader("Result")
     text = result.read_text(encoding="utf-8", errors="replace")
-    st.caption(f"`{result.relative_to(ROOT)}` · {len(text):,} characters")
+    st.caption(f"`{shown(result, LIBRARY)}` · {len(text):,} characters")
 
     from bt.verify import run_all
 
@@ -496,12 +580,111 @@ if result.exists():
         if not f.ok:
             st.error(f"**{f.name}** — {f.detail}", icon="⚠️")
 
-    st.download_button(
+    figures = sorted((out_dir / "images").glob("*.*"))
+
+    downloads = st.container(horizontal=True, vertical_alignment="center")
+    downloads.download_button(
         "Download Markdown",
         text,
         file_name=final_md.name,
         mime="text/markdown",
         type="primary",
     )
+    if figures:
+        # The Markdown links images by relative path, so the file alone is not
+        # the document -- a bundle is what someone can actually open elsewhere.
+        downloads.download_button(
+            "Download bundle",
+            bundle_zip(str(result), tuple(str(f) for f in figures)),
+            file_name=f"{pdf_path.stem}.zip",
+            mime="application/zip",
+            icon=":material/folder_zip:",
+        )
+
+    if figures:
+        with st.expander(f"Figures ({len(figures)})"):
+            st.caption(f"`{out_dir.name}/images/` — linked from the Markdown by name.")
+            grid = st.container(horizontal=True)
+            for f in figures[:8]:
+                try:
+                    grid.image(str(f), caption=f.name, width=180)
+                except Exception:  # noqa: BLE001 -- unreadable file, not a page error
+                    # One undecodable figure must not take the page down with
+                    # it. The Markdown still links the file; the reader can see
+                    # for themselves that it is damaged.
+                    grid.warning(f"{f.name} could not be read", icon=":material/broken_image:")
+            if len(figures) > 8:
+                st.caption(f"…and {len(figures) - 8} more.")
+
     with st.expander("Preview text"):
         st.text(text[:4000] + ("\n\n… truncated" if len(text) > 4000 else ""))
+
+    # ----------------------------------------------------------------------
+    # 6. translation -- optional, and a separate job from the pipeline
+    # ----------------------------------------------------------------------
+    from bt.translate import DEFAULT_MODEL, default_out_path
+
+    st.subheader("Translate")
+    with st.container(border=True):
+        t1, t2, t3 = st.columns([2, 2, 1])
+        target = t1.text_input(
+            "Target language", "English", help="Any language; the source is detected."
+        )
+        model = t2.selectbox(
+            "Model",
+            [DEFAULT_MODEL, "claude-sonnet-5", "claude-haiku-4-5"],
+            help="A whole book is one request per page. Sonnet and Haiku cost "
+            "less per page; Opus reads damaged OCR more reliably.",
+        )
+        t_chunk = t3.number_input("Pages per chunk", 1, 50, 10)
+
+        translated_md = default_out_path(result, target)
+        t_spec = jobs.TranslateSpec(
+            src=str(result),
+            out=str(translated_md),
+            target=target,
+            model=model,
+            pages_per_chunk=int(t_chunk),
+            total_pages=text.count("<!-- page ") or 1,
+        )
+        t_job = jobs.translate_status(out_dir)
+
+        st.caption(
+            f"Sends the text of `{result.name}` to the Anthropic API, one page "
+            "per request. Page anchors, footnote ids and image links are kept "
+            "out of the request and re-attached here, so they cannot be lost."
+        )
+        if not has_anthropic_credentials():
+            st.warning(
+                "No Anthropic credentials found. Set `ANTHROPIC_API_KEY` in the "
+                "environment, or run `ant auth login`, then restart the app.",
+                icon=":material/key_off:",
+            )
+
+        row = st.container(horizontal=True, vertical_alignment="center")
+        if t_job.running:
+            row.button("Translating…", disabled=True, icon=":material/sync:")
+            if row.button("Stop", icon=":material/stop_circle:", key="stop-translate"):
+                # Not kill_inference: llama-server belongs to the OCR job, which
+                # may well be running a different book right now.
+                jobs.stop_pids([t_job.pid], kill_inference=False)
+                st.rerun()
+        else:
+            label = (
+                f"Resume ({t_job.chunks_done}/{t_job.chunks_total or '?'})"
+                if t_job.chunks_done
+                else f"Translate to {target or 'English'}"
+            )
+            if row.button(label, type="primary", icon=":material/translate:"):
+                try:
+                    jobs.start_translate(t_spec, out_dir)
+                    st.rerun()
+                except RuntimeError as exc:
+                    st.error(str(exc), icon=":material/error:")
+            if t_job.chunks_done and row.button("Clear progress", key="clear-translate"):
+                for f in t_spec.chunk_dir.glob("*.md"):
+                    f.unlink()
+                jobs.translate_lock_path(out_dir).unlink(missing_ok=True)
+                st.rerun()
+
+        translation_panel(out_dir, translated_md)

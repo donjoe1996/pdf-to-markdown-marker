@@ -1,0 +1,28 @@
+# Theme for the PDF -> Markdown console.
+#
+# Restrained on purpose. This page is watched for hours while a book
+# transcribes, so structure comes from borders and spacing, and colour is
+# reserved for state -- running, stopped, failed -- which is the only thing here
+# that has to be readable from across a desk.
+#
+# Both schemes are defined and no `base` is set, so Streamlit follows the
+# browser's preference. A light-only theme half-inverts at night: the chrome
+# goes dark around a white page.
+
+[theme]
+primaryColor = "#3b5bdb"
+baseRadius = "medium"
+showWidgetBorder = true
+
+[theme.light]
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6fa"
+textColor = "#16181d"
+borderColor = "#dee2ea"
+
+[theme.dark]
+primaryColor = "#8098f9"
+backgroundColor = "#0f1117"
+secondaryBackgroundColor = "#191d27"
+textColor = "#e7e9ef"
+borderColor = "#2b3140"

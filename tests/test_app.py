@@ -151,20 +151,70 @@ def _open(at, pdf):
     return at
 
 
+def _tab(at, name):
+    """A tab addressed by name.
+
+    The tab label is the section heading now, so there is no <h3> repeating it
+    to look for -- and scoping an assertion to one tab is a stronger check than
+    searching the whole page for a string anyway.
+    """
+    return next(t for t in at.tabs if name in t.label)
+
+
 def test_result_and_translate_sections_render(finished_book):
-    """Everything below "Result" only exists once a run has produced output.
+    """Everything under Result only exists once a run has produced output.
 
     With no PDFs in the repo the other smoke tests skip before reaching it, so
     this half of the page was never executed -- and AppTest is the only thing
-    that catches a NameError in a branch the happy path never takes.
+    that catches a NameError in a branch the happy path never takes. That still
+    holds under the tabbed layout: a tab's children all execute, which is why
+    the sections are tabs and not st.navigation pages.
     """
     pdf, _ = finished_book
     at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
 
     assert not at.exception, [str(e.value) for e in at.exception]
-    headings = [s.value for s in at.subheader]
-    assert "Result" in headings and "Translate" in headings
-    assert any("Figures" in e.label for e in at.expander)
+    result = _tab(at, "Result")
+    assert any(b.label == "Download Markdown" for b in result.download_button)
+    assert any("Figures" in e.label for e in result.expander)
+    assert any(
+        b.label.startswith("Translate to") for b in _tab(at, "Translate").button
+    )
+
+
+def test_the_workflow_is_split_into_sections(finished_book):
+    """REGRESSION: the whole app used to be one scroll column.
+
+    Analysis, settings, preview, run, result, translation and the queue were
+    stacked with nothing marking where one ended and the next began, so there
+    was no way to tell which section you were looking at. Each step is a tab
+    now, and the worker and queue -- which belong to the machine, not to the
+    open document -- are a section of their own instead of sitting on top of it.
+    """
+    pdf, _ = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+
+    labels = [t.label for t in at.tabs]
+    assert len(labels) == 4, labels
+    for name in ("Transcribe", "Result", "Translate", "Queue"):
+        assert any(name in label for label in labels), labels
+    assert "Queue" in [s.value for s in _tab(at, "Queue").subheader]
+
+
+def test_result_and_translate_show_an_empty_state_before_any_output(make_pdf):
+    """A tab that is empty must say why, not render nothing.
+
+    Under the old single column these sections simply did not exist until
+    output did, which read as a broken page rather than as "not yet".
+    """
+    pdf = make_pdf("untouched.pdf", pages=1)
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    at.run()
+    at.sidebar.selectbox[0].set_value(pdf.name).run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert any("No Markdown yet" in i.value for i in _tab(at, "Result").info)
+    assert any("Nothing to translate" in i.value for i in _tab(at, "Translate").info)
 
 
 def test_translate_button_launches_a_detached_job(finished_book, monkeypatch):

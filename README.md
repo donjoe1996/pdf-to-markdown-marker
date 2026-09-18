@@ -128,6 +128,15 @@ uv run streamlit run app.py
 ```
 
 A local page for pointing the pipeline at any PDF without remembering flags.
+
+It is laid out around the two scopes it has to keep apart. The **sidebar**
+picks a document and says where its output goes, and reports machine state
+without acting on it. The **tabs** are the workflow, one step each —
+*Transcribe*, *Result*, *Translate* — plus *Queue* for the unattended worker,
+which belongs to the machine rather than to the document you have open. Above
+them sits a strip that appears only while a job is running, so it can be
+stopped from wherever you are.
+
 It inspects the file first and pre-fills the settings, because the two
 expensive choices are easy to get wrong and costly to undo:
 

@@ -239,6 +239,26 @@ directory splices overlapping page ranges into a duplicated book when
 
 `uv run streamlit run app.py`. A launcher and monitor, not the pipeline.
 
+**Two scopes, kept apart.** The page serves the *machine* (one worker, one OCR
+job at a time, a queue of books) and the *document* in front of you (analyse,
+configure, run, read, translate). They used to share one scroll column, which
+is why no section could be told from the next. Now the sidebar carries document
+selection plus read-only machine state, the tabs carry the document workflow
+one step each, and the worker's controls live in the Queue tab — one place to
+act, one place to glance. A running job gets a strip above the tabs, because
+stopping it is the one action that must not wait for navigation.
+
+**Tabs, not `st.navigation` pages.** A page renders only its own code, so the
+AppTest suite would stop executing every branch in a single run — and catching
+a NameError in a branch the happy path never reaches is the whole reason that
+suite exists. Every tab's children execute on every run, so the net is
+unchanged; `at.tabs[i].label` addresses a section in a test.
+
+**The theme is in `.streamlit/config.toml`,** with both light and dark defined
+and no `base`, so it follows the browser. Colour is reserved for state —
+running, stopped, failed — and structure comes from borders and spacing:
+this page is watched for hours while a book transcribes.
+
 **Why it runs a subprocess.** Streamlit re-executes its script on every
 interaction, so a long job cannot live inside the app. `bt/jobs.py` launches
 `bt.run` detached and reconstructs status **entirely from disk** — chunk files

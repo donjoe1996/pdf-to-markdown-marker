@@ -166,6 +166,25 @@ def test_an_edge_block_is_named_rather_than_reported_as_a_bad_request(no_sleep):
     assert len(transport.requests) == 1  # not retried: it fails identically
 
 
+def test_a_retired_model_id_says_how_to_find_a_live_one(no_sleep):
+    """The other half of the 1010 incident: the preset id was also dead.
+
+    `llama-3.3-70b-versatile` was groq's default here and had been retired;
+    the CDN block hid that until it was fixed. A free tier retires ids on its
+    own schedule, so the message names the endpoint that lists the current
+    ones rather than leaving the reader to search for a changelog.
+    """
+    body = b'{"error":{"message":"The model does not exist","code":"model_not_found"}}'
+    transport = FakeTransport((404, body))
+    tr = OpenAICompatTranslator(resolve_provider("local"), transport=transport, rpm=0)
+
+    with pytest.raises(TranslationError) as exc:
+        tr("page", "English")
+    assert "/models" in str(exc.value)  # where the live ids are listed
+    assert "--model" in str(exc.value)  # and how to pass one
+    assert len(transport.requests) == 1
+
+
 # --------------------------------------------------------------------------
 # the response, before it is trusted
 # --------------------------------------------------------------------------

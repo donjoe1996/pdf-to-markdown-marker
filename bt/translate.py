@@ -317,7 +317,10 @@ PROVIDERS: dict[str, Provider] = {
     "groq": Provider(
         name="groq",
         base_url="https://api.groq.com/openai/v1",
-        model="llama-3.3-70b-versatile",
+        # Verified against GET /v1/models on 2026-09-18. The previous default,
+        # llama-3.3-70b-versatile, had been retired and returns 404 -- see
+        # model_error_hint(), which is how the next one will announce itself.
+        model="openai/gpt-oss-120b",
         key_env="GROQ_API_KEY",
         rpm=25,
         note="free tier, fastest of these by a distance",
@@ -418,6 +421,29 @@ def edge_block_message(status: int, body: bytes) -> str:
     )
 
 
+# A retired model id, in whichever words the provider chose. Free tiers drop
+# models on their own schedule -- this is the expected way a preset goes stale,
+# not an exceptional one.
+DEAD_MODEL = re.compile(rb"model_not_found|model_decommissioned|does not exist")
+
+
+def model_error_hint(status: int, body: bytes, provider: Provider) -> str:
+    """Point a retired model id at the list of live ones, or return "".
+
+    The endpoint that answers the question is one call away and the same on
+    every provider here, so naming it beats leaving the reader to find a
+    changelog. ``--model`` then overrides without a code change.
+    """
+    if status not in (400, 404) or not DEAD_MODEL.search(body or b""):
+        return ""
+    return (
+        f" -- {provider.model!r} is not served by {provider.name} any more. "
+        f"List the current ids with: curl -H \"Authorization: Bearer "
+        f"${provider.key_env or 'KEY'}\" {provider.base_url.rstrip('/')}/models "
+        "-- then pass one with --model."
+    )
+
+
 class OpenAICompatTranslator:
     """Translate a page through an OpenAI-compatible chat completions endpoint."""
 
@@ -503,6 +529,7 @@ class OpenAICompatTranslator:
 
             last = edge_block_message(status, body) or (
                 f"HTTP {status}: {body[:200].decode('utf-8', 'replace')}"
+                + model_error_hint(status, body, self.provider)
             )
             # 429 and 5xx are worth waiting out; a 400 (bad model id, bad key)
             # will fail identically 582 times, so raise it now.

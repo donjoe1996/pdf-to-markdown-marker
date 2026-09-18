@@ -362,7 +362,11 @@ an exported variable alone.
 
 **Model ids are presets, not constants.** Free-tier ids are retired regularly,
 so `--model` overrides without a code change and the GUI shows the id in an
-editable field rather than a fixed list.
+editable field rather than a fixed list. It happens: groq's preset was
+`llama-3.3-70b-versatile` until it was retired, and `model_error_hint()` now
+answers a 404 with the `/models` call that lists the live ids. Check there
+before suspecting the code — but check the *body* of the failure first, since
+a CDN block (above) looks like this and is not.
 
 **Send a `User-Agent`; urllib's default is banned.** Every hosted provider here
 sits behind Cloudflare, whose managed rules reject `Python-urllib/3.x` outright.

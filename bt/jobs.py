@@ -437,13 +437,54 @@ def translate_status(out_dir: str | Path) -> JobStatus:
     return st
 
 
-def start_translate(spec: TranslateSpec, out_dir: str | Path) -> JobStatus:
+def translate_env(provider: str, api_key: str) -> dict[str, str]:
+    """This process's environment, plus a key supplied at launch time.
+
+    The key travels in the environment and nowhere else. The two alternatives
+    are both leaks: a ``--api-key`` flag would publish it in ``ps`` for the
+    hours the run takes -- this module reads other processes' command lines
+    itself, in ``find_pipeline_processes()`` -- and a field on ``TranslateSpec``
+    would be serialised into ``.translate.lock``, a file that sits next to the
+    book and outlives the run.
+
+    It also means the backend needs no key parameter: ``OpenAICompatTranslator``
+    already reads ``os.environ[key_env]``, so a key pasted into the GUI and one
+    exported in a shell arrive by exactly the same path, and only one of them
+    can be wrong.
+
+    The variable's *name* is resolved from the provider preset rather than
+    taken from the caller, so the GUI and the CLI cannot disagree about where
+    groq's key lives. An empty key changes nothing -- a blank field means "use
+    what is already exported", not "unset it".
+    """
+    env = dict(os.environ)
+    if not api_key:
+        return env
+    # Local, so bt.translate's module-level env setup is not pulled into the
+    # worker's import path for a function that rarely runs.
+    from bt.translate import PROVIDERS
+
+    preset = PROVIDERS.get(provider)
+    # A keyless provider (local, ollama) has nowhere to put it. Inventing a
+    # variable name would either do nothing or send a secret to a server on
+    # this machine that never asked for one.
+    if preset is not None and preset.key_env:
+        env[preset.key_env] = api_key
+    return env
+
+
+def start_translate(
+    spec: TranslateSpec, out_dir: str | Path, api_key: str = ""
+) -> JobStatus:
     """Launch the translator detached, as ``start()`` does for the pipeline.
 
     Same reasoning: Streamlit re-runs its script on every interaction, and a
     book takes hours. Refuses only a second translation of the *same* document
     -- an OCR run elsewhere on the machine is no obstacle, since this job is
     waiting on the network rather than holding the memory.
+
+    ``api_key`` is the key the caller was given interactively, if any; see
+    ``translate_env`` for why it goes to the child through the environment.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -459,6 +500,7 @@ def start_translate(spec: TranslateSpec, out_dir: str | Path) -> JobStatus:
         stderr=subprocess.STDOUT,
         cwd=Path(__file__).resolve().parent.parent,
         start_new_session=True,
+        env=translate_env(spec.provider, api_key),
     )
     translate_lock_path(out).write_text(
         json.dumps({"pid": proc.pid, "started": time.time(), "spec": asdict(spec)}),

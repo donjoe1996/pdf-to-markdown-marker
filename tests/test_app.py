@@ -179,7 +179,8 @@ def test_translate_button_launches_a_detached_job(finished_book, monkeypatch):
     monkeypatch.setattr(
         jobs,
         "start_translate",
-        lambda spec, folder: launched.append((spec, folder)) or jobs.JobStatus(),
+        lambda spec, folder, api_key="": launched.append((spec, folder))
+        or jobs.JobStatus(),
     )
 
     at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
@@ -195,6 +196,77 @@ def test_translate_button_launches_a_detached_job(finished_book, monkeypatch):
     # Its chunks must not land in the OCR chunk directory: queue.survey() counts
     # files there to decide a book is finished.
     assert spec.chunk_dir != out / "chunks"
+
+
+def _key_field(at):
+    """The API key box, addressed by label rather than by index.
+
+    The Translate panel holds several text inputs and the page above it holds
+    more; a positional index here would break on the next layout change.
+    """
+    return next(t for t in at.text_input if "API key" in t.label)
+
+
+def test_a_pasted_key_is_handed_to_the_job_and_not_kept_on_disk(
+    finished_book, monkeypatch
+):
+    """The point of the field: a key typed in the browser must reach the run.
+
+    The GUI holds no durable state by design, so the key lives only in this
+    session and is handed to ``start_translate`` at launch. ``jobs`` then puts
+    it in the child's environment -- never the command line, never the lock
+    file (see test_jobs.py).
+    """
+    from bt import jobs
+
+    pdf, _out = finished_book
+    launched = []
+    monkeypatch.setattr(
+        jobs,
+        "start_translate",
+        lambda spec, folder, api_key="": launched.append((spec, api_key))
+        or jobs.JobStatus(),
+    )
+
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    provider = next(s for s in at.selectbox if s.label == "Provider")
+    provider.set_value("groq").run()
+    _key_field(at).set_value("gsk-pasted-in-the-browser").run()
+    next(b for b in at.button if b.label.startswith("Translate to")).click().run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert launched and launched[0][1] == "gsk-pasted-in-the-browser"
+    # Nothing on the spec: it is serialised into .translate.lock verbatim.
+    assert "gsk-pasted-in-the-browser" not in str(launched[0][0])
+
+
+def test_the_key_field_is_per_provider(finished_book):
+    """REGRESSION RISK: one shared field would send groq's key to gemini.
+
+    Switching providers must not carry the previous key across -- the request
+    would be rejected, and a secret would have been sent to a service it was
+    not issued for.
+    """
+    pdf, _out = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    provider = next(s for s in at.selectbox if s.label == "Provider")
+    provider.set_value("groq").run()
+    _key_field(at).set_value("gsk-for-groq").run()
+    assert _key_field(at).value == "gsk-for-groq"
+
+    next(s for s in at.selectbox if s.label == "Provider").set_value("gemini").run()
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert _key_field(at).value == ""
+
+
+def test_a_keyless_provider_offers_no_key_field(finished_book):
+    """`local` and `ollama` need no account; a key box there is only confusing."""
+    pdf, _out = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    next(s for s in at.selectbox if s.label == "Provider").set_value("local").run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert not [t for t in at.text_input if "API key" in t.label]
 
 
 def test_an_output_folder_outside_the_project_does_not_crash(finished_book, tmp_path):

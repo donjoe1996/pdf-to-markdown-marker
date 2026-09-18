@@ -364,6 +364,15 @@ an exported variable alone.
 so `--model` overrides without a code change and the GUI shows the id in an
 editable field rather than a fixed list.
 
+**Send a `User-Agent`; urllib's default is banned.** Every hosted provider here
+sits behind Cloudflare, whose managed rules reject `Python-urllib/3.x` outright.
+The refusal is `HTTP 403: error code: 1010` — a bare text body from the edge,
+not the API, so neither the key nor the model id was ever looked at. It reads
+exactly like a retired model id, and was first diagnosed as one. `USER_AGENT` is
+sent on every request, and `edge_block_message()` tells a CDN refusal (bare
+`error code: NNNN`) apart from the provider's own JSON error so the message
+points at the network rather than at the key.
+
 **Pacing is deliberate, not reactive.** `rpm` holds to the provider's budget by
 waiting *before* the request. A 429 costs the request and the backoff, and free
 tiers count refusals — so waiting 3s by choice beats being refused and waiting

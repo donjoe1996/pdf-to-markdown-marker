@@ -40,6 +40,14 @@ DEFAULT_PAGES_PER_CHUNK = 10
 # Hitting this ceiling is an error, not a result -- see _read().
 MAX_TOKENS = 8000
 
+# Sent on every request, because urllib's default is not neutral. Left unset it
+# sends ``Python-urllib/3.x``, which Cloudflare's managed rules ban outright --
+# and Groq, OpenRouter and Gemini all sit behind a CDN. The refusal arrives as
+# ``HTTP 403: error code: 1010`` from the edge, before the key or the model id
+# is ever looked at, so it reads like a retired model. An ordinary agent string
+# is all that is being asked for here; nothing is being disguised.
+USER_AGENT = "bt-translate/1.0"
+
 # Footnote ids ([^p13-1]) and image targets are cross-references, not prose. If
 # the model rewrites one the document still renders -- it just points at the
 # wrong thing, which is the kind of damage that surfaces months later.
@@ -376,6 +384,40 @@ def _urllib_transport(url: str, headers: dict, body: bytes, timeout: float):
         ) from exc
 
 
+# Cloudflare's own error pages, which are not the provider's. The body is bare
+# text -- ``error code: 1010`` -- where every real refusal from these APIs is
+# JSON with a ``code`` naming the cause. Distinguishing them matters because
+# the two point at opposite fixes: one is a wrong model id or key, the other
+# means the request never reached the API at all.
+EDGE_ERROR = re.compile(rb"\A\s*error code:\s*(\d{3,4})\s*\Z")
+
+EDGE_CAUSES = {
+    "1010": "the client's user agent is banned (urllib's default is)",
+    "1015": "the edge is rate limiting this IP, ahead of the API's own limit",
+    "1020": "a firewall rule rejected the request",
+}
+
+
+def edge_block_message(status: int, body: bytes) -> str:
+    """Name a CDN refusal, or return "" if this is the provider's own error.
+
+    Reported as ``HTTP 403: error code: 1010`` the failure sends the reader to
+    check their key and their model id, neither of which is wrong -- that body
+    never came from the API.
+    """
+    match = EDGE_ERROR.match(body or b"")
+    if not match:
+        return ""
+    code = match.group(1).decode()
+    cause = EDGE_CAUSES.get(code, "the request was rejected at the edge")
+    return (
+        f"HTTP {status}: Cloudflare error {code} -- {cause}. The request never "
+        "reached the API, so neither the API key nor the model id is at fault. "
+        "Check the network path (VPN, proxy, corporate DNS) and retry; a "
+        "different provider (--provider gemini) avoids this edge entirely."
+    )
+
+
 class OpenAICompatTranslator:
     """Translate a page through an OpenAI-compatible chat completions endpoint."""
 
@@ -429,7 +471,7 @@ class OpenAICompatTranslator:
 
     # -- the request ----------------------------------------------------
     def _post(self, payload: dict) -> tuple[int, bytes, dict]:
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         url = self.provider.base_url.rstrip("/") + "/chat/completions"
@@ -459,7 +501,9 @@ class OpenAICompatTranslator:
             if status == 200:
                 return self._read(body)
 
-            last = f"HTTP {status}: {body[:200].decode('utf-8', 'replace')}"
+            last = edge_block_message(status, body) or (
+                f"HTTP {status}: {body[:200].decode('utf-8', 'replace')}"
+            )
             # 429 and 5xx are worth waiting out; a 400 (bad model id, bad key)
             # will fail identically 582 times, so raise it now.
             if status != 429 and status < 500:

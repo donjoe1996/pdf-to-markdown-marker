@@ -292,3 +292,94 @@ def test_token_usage_is_accumulated():
     tr("one", "English")
     tr("two", "English")
     assert tr.input_tokens == 20 and tr.output_tokens == 40
+
+
+# --------------------------------------------------------------------------
+# listing what the provider actually serves
+# --------------------------------------------------------------------------
+# Shaped like a real GET /v1/models response from groq, trimmed. The whole
+# point of the endpoint here is that ids are not ours to pin, so the fixture
+# records the *shape* the filter reads, not a list that stays true.
+GROQ_MODELS = {
+    "object": "list",
+    "data": [
+        {"id": "openai/gpt-oss-120b", "active": True, "context_window": 131072,
+         "max_completion_tokens": 65536,
+         "input_modalities": ["text"], "output_modalities": ["text"]},
+        {"id": "qwen/qwen3.8-27b", "active": True, "context_window": 131042,
+         "max_completion_tokens": 16384,
+         "input_modalities": ["text", "image"], "output_modalities": ["text"]},
+        # audio in, a transcript out -- not a translator
+        {"id": "whisper-large-v3", "active": True, "context_window": 448,
+         "max_completion_tokens": 448,
+         "input_modalities": ["audio"], "output_modalities": ["transcription"]},
+        # text in, speech out
+        {"id": "canopylabs/orpheus-v1-english", "active": True,
+         "max_completion_tokens": 50000,
+         "input_modalities": ["text"], "output_modalities": ["speech"]},
+        # a 512-token safety classifier; text both ways, but it cannot emit a page
+        {"id": "meta-llama/llama-prompt-guard-2-86m", "active": True,
+         "context_window": 512, "max_completion_tokens": 512,
+         "input_modalities": ["text"], "output_modalities": ["text"]},
+        {"id": "retired-but-listed", "active": False,
+         "max_completion_tokens": 32768,
+         "input_modalities": ["text"], "output_modalities": ["text"]},
+    ],
+}
+
+
+class FakeGet:
+    """Records the GET and replays one response."""
+
+    def __init__(self, status=200, payload=None, body=None):
+        self.status = status
+        self.body = body if body is not None else json.dumps(payload).encode()
+        self.requests: list[dict] = []
+
+    def __call__(self, url, headers, timeout):
+        del timeout
+        self.requests.append({"url": url, "headers": headers})
+        return self.status, self.body
+
+
+def test_the_model_list_keeps_only_what_could_translate_a_page():
+    """Offering whisper as a translator is offering a guaranteed failure.
+
+    A provider's list is everything it serves -- speech, transcription and
+    512-token classifiers included. A page needs text in, text out, and an
+    output cap at least as large as the MAX_TOKENS we ask for; anything else
+    fails, and the small-cap ones fail *silently*, by truncation.
+    """
+    get = FakeGet(payload=GROQ_MODELS)
+    ids = translate.list_models(resolve_provider("groq"), "sk-x", transport=get)
+
+    assert ids == ["openai/gpt-oss-120b", "qwen/qwen3.8-27b"]
+    assert get.requests[0]["url"].endswith("/models")
+    assert get.requests[0]["headers"]["Authorization"] == "Bearer sk-x"
+
+
+def test_a_list_without_metadata_is_passed_through_whole():
+    """llama.cpp answers with bare ids; filtering on absent fields would empty it."""
+    get = FakeGet(payload={"data": [{"id": "local-model"}, {"id": "another"}]})
+    assert translate.list_models(resolve_provider("local"), transport=get) == [
+        "another",
+        "local-model",
+    ]
+
+
+def test_a_refused_listing_is_an_error_not_an_empty_list():
+    """An empty list and a rejected request look identical to a caller.
+
+    The GUI falls back to a free-text field when the listing fails; told
+    "no models" instead, it would offer an empty picker and no way to type.
+    """
+    get = FakeGet(status=401, body=b'{"error":{"code":"invalid_api_key"}}')
+    with pytest.raises(TranslationError, match="401"):
+        translate.list_models(resolve_provider("groq"), "bad", transport=get)
+
+
+def test_an_edge_block_on_the_listing_is_named_too():
+    """The CDN sits in front of /models exactly as it sits in front of /chat."""
+    get = FakeGet(status=403, body=b"error code: 1010")
+    with pytest.raises(TranslationError, match="(?i)cloudflare"):
+        translate.list_models(resolve_provider("groq"), "sk-x", transport=get)

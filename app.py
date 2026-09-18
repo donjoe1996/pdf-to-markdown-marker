@@ -10,6 +10,7 @@ run. See bt/jobs.py for why that matters.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import shlex
@@ -76,6 +77,28 @@ def render_halves(path: str, index: int, dpi: int, mtime: float):
             dpi=dpi, clip=pymupdf.Rect(cut, rect.y0, rect.x1, rect.y1)
         ).tobytes("png")
     return left, right, gutter, band
+
+
+@st.cache_data(ttl=600, max_entries=8, show_spinner=False)
+def list_translation_models(provider_name: str, key_fingerprint: str, _api_key: str):
+    """The ids a provider serves right now, or the reason it could not be asked.
+
+    Returns ``(ids, error)`` rather than raising: a failed listing is not a
+    failed page, and the panel still has a preset to fall back to.
+
+    ``key_fingerprint`` is in the cache key so that changing the key refetches;
+    ``_api_key`` is underscore-prefixed so Streamlit does not hash it, which
+    keeps the secret itself out of the cache key. Ten minutes is long enough
+    that switching providers back and forth is free, short enough that a
+    retirement shows up the same session.
+    """
+    from bt.translate import PROVIDERS, TranslationError, list_models
+
+    del key_fingerprint
+    try:
+        return list_models(PROVIDERS[provider_name], _api_key), ""
+    except TranslationError as exc:
+        return [], str(exc)
 
 
 @st.cache_data(show_spinner="Building bundle…")
@@ -630,45 +653,6 @@ if result.exists():
         )
         provider = PROVIDERS[provider_name]
 
-        t3, t4 = st.columns([3, 1])
-        model = t3.text_input(
-            "Model",
-            value=provider.model,
-            key=f"model-{provider_name}",
-            help="Free-tier model ids get retired; if one stops working, put a "
-            "current one here. A local server ignores the name and serves "
-            "whatever it loaded.",
-        )
-        t_chunk = t4.number_input("Pages per chunk", 1, 50, 10)
-
-        translated_md = default_out_path(result, target)
-        t_spec = jobs.TranslateSpec(
-            src=str(result),
-            out=str(translated_md),
-            target=target,
-            provider=provider_name,
-            model=model.strip(),
-            pages_per_chunk=int(t_chunk),
-            total_pages=text.count("<!-- page ") or 1,
-        )
-        t_job = jobs.translate_status(out_dir)
-
-        pages_to_do = t_spec.total_pages
-        if provider.key_env:
-            st.caption(
-                f"Sends the text of `{result.name}` to {provider.base_url}, one "
-                f"request per page ({pages_to_do} pages), paced to "
-                f"{provider.rpm}/min. Page anchors, footnote ids and image links "
-                "are kept out of the request and re-attached here."
-            )
-        else:
-            st.caption(
-                f"Runs against a server on this machine ({provider.base_url}), "
-                f"one request per page ({pages_to_do} pages). Nothing leaves the "
-                "machine. Page anchors, footnote ids and image links are kept "
-                "out of the request and re-attached here."
-            )
-
         # The key, pasted rather than exported. Exporting one means restarting
         # the app, which on a machine mid-run is the most expensive way to
         # supply a string. This field is the same key by a shorter path:
@@ -678,6 +662,10 @@ if result.exists():
         # Keyed per provider on purpose. One shared box would carry a groq key
         # into a gemini run -- refused by the server, and a secret sent to a
         # service it was not issued for.
+        #
+        # It sits above the model picker because the picker depends on it: the
+        # list of models is fetched from the provider, and the provider will
+        # not answer without the key.
         api_key = ""
         if provider.key_env:
             api_key = (
@@ -714,6 +702,92 @@ if result.exists():
                 f"No key yet. `{provider.key_env}` is not set either — paste one "
                 f"above; it is free to obtain from {provider_name}.",
                 icon=":material/key_off:",
+            )
+
+        # Ask the provider what it serves rather than trusting the preset. A
+        # retired id is the normal way this stage breaks -- groq dropped
+        # llama-3.3-70b-versatile while it was still the default here -- and
+        # the answer is one GET away on the same OpenAI-compatible surface the
+        # translation itself uses.
+        #
+        # Only when there is a key to ask with: a keyless request just earns a
+        # 401, and showing the user that instead of the preset is worse than
+        # not having asked. A local server needs no key and is asked always.
+        listed: list[str] = []
+        list_error = ""
+        usable_key = api_key or env_key
+        if usable_key or not provider.key_env:
+            listed, list_error = list_translation_models(
+                provider_name,
+                hashlib.sha256(usable_key.encode()).hexdigest()[:16],
+                usable_key,
+            )
+
+        t3, t4 = st.columns([3, 1])
+        # The preset stays available when nothing was listed, and remains the
+        # default when it is still served. accept_new_options keeps the field
+        # typeable either way: a list is a better starting point than a
+        # constant, but it is not a constraint -- a provider can serve a model
+        # its own listing omits.
+        options = listed or [provider.model]
+        model = t3.selectbox(
+            "Model",
+            options,
+            index=options.index(provider.model) if provider.model in options else 0,
+            key=f"model-{provider_name}",
+            accept_new_options=True,
+            help="Listed by the provider itself, filtered to models that can "
+            "take a page of text and give one back. Type an id to use one "
+            "that is not listed. A local server ignores the name and serves "
+            "whatever it loaded.",
+        )
+        t_chunk = t4.number_input("Pages per chunk", 1, 50, 10)
+
+        refresh = st.container(horizontal=True, vertical_alignment="center")
+        if listed:
+            refresh.caption(
+                f"{len(listed)} models listed by {provider_name}, cached for "
+                "10 minutes."
+            )
+        elif list_error:
+            refresh.caption(
+                f"Could not list models ({list_error.split('.')[0]}). Showing "
+                "the built-in default; type an id to override it."
+            )
+        elif provider.key_env:
+            refresh.caption("Add a key above to list the models this provider serves.")
+        if refresh.button(
+            "Refresh", icon=":material/refresh:", key="refresh-models"
+        ):
+            list_translation_models.clear()
+            st.rerun()
+
+        translated_md = default_out_path(result, target)
+        t_spec = jobs.TranslateSpec(
+            src=str(result),
+            out=str(translated_md),
+            target=target,
+            provider=provider_name,
+            model=(model or provider.model).strip(),
+            pages_per_chunk=int(t_chunk),
+            total_pages=text.count("<!-- page ") or 1,
+        )
+        t_job = jobs.translate_status(out_dir)
+
+        pages_to_do = t_spec.total_pages
+        if provider.key_env:
+            st.caption(
+                f"Sends the text of `{result.name}` to {provider.base_url}, one "
+                f"request per page ({pages_to_do} pages), paced to "
+                f"{provider.rpm}/min. Page anchors, footnote ids and image links "
+                "are kept out of the request and re-attached here."
+            )
+        else:
+            st.caption(
+                f"Runs against a server on this machine ({provider.base_url}), "
+                f"one request per page ({pages_to_do} pages). Nothing leaves the "
+                "machine. Page anchors, footnote ids and image links are kept "
+                "out of the request and re-attached here."
             )
 
         row = st.container(horizontal=True, vertical_alignment="center")

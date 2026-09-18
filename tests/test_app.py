@@ -295,3 +295,67 @@ def test_a_corrupt_figure_does_not_take_the_page_down(finished_book):
     assert not at.exception, [str(e.value) for e in at.exception]
     assert any("could not be read" in w.value for w in at.warning)
 
+
+
+def _model_field(at):
+    """The model picker, addressed by label rather than by index."""
+    return next(s for s in at.selectbox if s.label == "Model")
+
+
+def test_the_model_picker_offers_what_the_provider_serves(finished_book, monkeypatch):
+    """The preset is a starting point; the provider is the authority.
+
+    groq retired llama-3.3-70b-versatile while it was still the default here,
+    and the run failed with a 404 that read like a bug. Asking the provider
+    what it serves removes the whole class of failure -- and the answer is
+    filtered, because that same list offers whisper and 512-token classifiers,
+    neither of which can translate a page.
+    """
+    import json as _json
+
+    from bt import translate as bt_translate
+
+    payload = {
+        "data": [
+            {"id": "openai/gpt-oss-120b", "active": True,
+             "max_completion_tokens": 65536,
+             "input_modalities": ["text"], "output_modalities": ["text"]},
+            {"id": "whisper-large-v3", "active": True, "max_completion_tokens": 448,
+             "input_modalities": ["audio"], "output_modalities": ["transcription"]},
+        ]
+    }
+    monkeypatch.setattr(
+        bt_translate,
+        "_urllib_get",
+        lambda url, headers, timeout: (200, _json.dumps(payload).encode()),
+    )
+
+    pdf, _out = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    next(s for s in at.selectbox if s.label == "Provider").set_value("groq").run()
+    _key_field(at).set_value("gsk-listing-test").run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    options = list(_model_field(at).options)
+    assert "openai/gpt-oss-120b" in options
+    assert "whisper-large-v3" not in options  # audio in, a transcript out
+
+
+def test_a_provider_that_will_not_list_still_leaves_a_usable_model_field(
+    finished_book,
+):
+    """A failed listing must not cost the user the field.
+
+    The autouse `isolate` fixture refuses outbound HTTP, so this is the
+    offline/blocked path: the preset stays selectable and the picker stays
+    typeable, because a provider can serve a model its own listing omits.
+    """
+    pdf, _out = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    next(s for s in at.selectbox if s.label == "Provider").set_value("groq").run()
+    _key_field(at).set_value("gsk-listing-refused").run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    field = _model_field(at)
+    assert field.value  # the preset, not an empty picker
+    assert field.accept_new_options  # and an id can still be typed

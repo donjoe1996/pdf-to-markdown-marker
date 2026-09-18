@@ -27,6 +27,7 @@ import pytest
 
 from bt import jobs
 from bt import queue as bt_queue
+from bt import translate as bt_translate
 
 PAGE_RULE = "-" * 48
 
@@ -58,6 +59,16 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(bt_queue, "ROOT", tmp_path)
     monkeypatch.setattr(bt_queue, "OUTPUT_ROOT", out_root)
     monkeypatch.setattr(bt_queue, "QUEUE_FILE", out_root / "queue.json")
+
+    # Outbound HTTP. The GUI lists a provider's models as soon as it has a key,
+    # so a test that types one would otherwise reach api.groq.com for real --
+    # slow, flaky offline, and spending someone's free tier from a test run.
+    # Refusing here exercises the fallback path by default; a test that wants a
+    # listing injects one through the transport argument.
+    def _no_network(url, headers, timeout):
+        raise bt_translate.TranslationError(f"no network in tests: {url}")
+
+    monkeypatch.setattr(bt_translate, "_urllib_get", _no_network)
 
     return tmp_path
 

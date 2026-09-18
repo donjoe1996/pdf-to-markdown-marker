@@ -360,6 +360,27 @@ to the book and outlives the run. The GUI field is keyed per provider, so
 switching providers cannot send groq's key to gemini, and an empty field leaves
 an exported variable alone.
 
+**The model list is fetched, not hardcoded.** `list_models()` asks the provider
+what it serves through `GET /v1/models` — the same OpenAI-compatible surface as
+`/chat/completions`, so one code path covers llama.cpp, Ollama, OpenRouter, groq
+and Gemini — and the GUI populates its picker from that. The list is **filtered**:
+a provider serves everything it has, and groq's includes whisper (audio in, a
+transcript out), Orpheus (speech out) and 512-token prompt-guard classifiers.
+Offering those as translators offers a guaranteed failure, and the small-cap ones
+fail *silently*, by truncation. `_can_translate_a_page()` keeps text→text models
+whose output cap reaches `MAX_TOKENS`, judging only on fields that are present —
+llama.cpp answers with bare ids, and filtering on what it never sends would empty
+the list. A refusal raises rather than returning `[]`: the two are
+indistinguishable to a caller, and one told "no models" would render an empty
+picker instead of falling back to the preset.
+
+The GUI asks only when it has a key (a keyless request just earns a 401), caches
+for 10 minutes keyed on a *fingerprint* of the key rather than the key itself,
+and keeps `accept_new_options=True` so an unlisted id can still be typed. The
+key field sits above the picker because the picker depends on it. Tests never
+reach the network: the autouse `isolate` fixture refuses `translate._urllib_get`,
+so the fallback path is the default under test and a listing must be injected.
+
 **Model ids are presets, not constants.** Free-tier ids are retired regularly,
 so `--model` overrides without a code change and the GUI shows the id in an
 editable field rather than a fixed list. It happens: groq's preset was

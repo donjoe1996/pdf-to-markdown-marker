@@ -444,6 +444,106 @@ def model_error_hint(status: int, body: bytes, provider: Provider) -> str:
     )
 
 
+def _urllib_get(url: str, headers: dict, timeout: float):
+    """GET, returning ``(status, payload)`` for any status rather than raising.
+
+    Separate from the POST transport because the two want different things
+    from a failure: a 429 there is data to be waited out, while here any
+    non-200 simply ends the listing. Injected in tests, same as the POST one.
+    """
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+    except urllib.error.URLError as exc:
+        raise TranslationError(
+            f"cannot reach {url}: {exc.reason}. For a local provider, is the "
+            "server running? (llama-server ... --port 8080)"
+        ) from exc
+
+
+def _can_translate_a_page(entry: dict) -> bool:
+    """Is this listed model one a page of prose could go through?
+
+    A provider's list is everything it serves. groq's includes whisper (audio
+    in, a transcript out), Orpheus (speech out) and the 512-token prompt-guard
+    classifiers. Offering those as translators offers a guaranteed failure --
+    and the small-cap ones fail *silently*, by truncation, which is the worst
+    outcome this stage has.
+
+    Judged only on fields that are present: llama.cpp answers with bare ids,
+    and filtering on what it never sends would empty the list.
+    """
+    if entry.get("active") is False:
+        return False
+    for modality_field in ("input_modalities", "output_modalities"):
+        modalities = entry.get(modality_field)
+        if modalities and "text" not in modalities:
+            return False
+    # It must be able to emit what we ask for. Below that the page comes back
+    # cut off mid-sentence, which reads exactly like a page that ended there.
+    for cap_field in ("max_completion_tokens", "max_output_length"):
+        cap = entry.get(cap_field)
+        if isinstance(cap, int) and cap < MAX_TOKENS:
+            return False
+    return True
+
+
+def list_models(
+    provider: Provider, api_key: str = "", transport=None, timeout: float = 30.0
+) -> list[str]:
+    """The ids this provider serves right now, filtered to plausible translators.
+
+    ``GET /v1/models`` is part of the same OpenAI-compatible surface as
+    ``/chat/completions``, so llama.cpp, Ollama, OpenRouter, groq and Google's
+    compatibility endpoint all answer it -- one code path, as with the
+    translator itself.
+
+    Raising rather than returning ``[]`` on a refusal is deliberate: the two
+    are indistinguishable to a caller, and a caller told "no models" would
+    offer an empty picker instead of falling back to a typed id.
+    """
+    transport = transport or _urllib_get
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    key = api_key or (os.environ.get(provider.key_env, "") if provider.key_env else "")
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+
+    url = provider.base_url.rstrip("/") + "/models"
+    status, body = transport(url, headers, timeout)
+    if status != 200:
+        raise TranslationError(
+            edge_block_message(status, body)
+            or f"HTTP {status}: {body[:200].decode('utf-8', 'replace')}"
+        )
+
+    try:
+        data = json.loads(body)
+    except ValueError as exc:
+        raise TranslationError(
+            f"model list was not JSON: {body[:200].decode('utf-8', 'replace')}"
+        ) from exc
+
+    entries = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        raise TranslationError(f"unexpected model list shape: {str(data)[:200]}")
+
+    return sorted(
+        {
+            entry["id"]
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("id")
+            and _can_translate_a_page(entry)
+        }
+    )
+
+
 class OpenAICompatTranslator:
     """Translate a page through an OpenAI-compatible chat completions endpoint."""
 

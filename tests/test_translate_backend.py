@@ -132,6 +132,40 @@ def test_the_key_is_sent_as_a_bearer_token(monkeypatch):
     assert transport.requests[0]["headers"]["Authorization"] == "Bearer sk-test-123"
 
 
+def test_requests_carry_a_real_user_agent():
+    """Groq sits behind Cloudflare, which bans urllib's default agent.
+
+    With no User-Agent set, urllib sends ``Python-urllib/3.x`` and Cloudflare
+    refuses the request at the edge with ``HTTP 403: error code: 1010`` -- a
+    body that never came from the API, so neither the key nor the model id was
+    ever looked at. Reported as a run that "stopped early", it reads exactly
+    like a retired model id, which is what it was first diagnosed as.
+    """
+    transport = FakeTransport(reply("x"))
+    tr = OpenAICompatTranslator(resolve_provider("local"), transport=transport)
+    tr("page", "English")
+
+    agent = transport.requests[0]["headers"].get("User-Agent", "")
+    assert agent, "no User-Agent set: urllib supplies a banned one"
+    assert "urllib" not in agent.lower()
+
+
+def test_an_edge_block_is_named_rather_than_reported_as_a_bad_request(no_sleep):
+    """``error code: 1010`` is Cloudflare's, not the provider's.
+
+    The provider's own refusals are JSON (``model_not_found``,
+    ``invalid_api_key``); a bare ``error code: NNNN`` is the CDN in front of it
+    and means the request never arrived. Saying only "HTTP 403" sends the
+    reader to check their key and their model id, neither of which is wrong.
+    """
+    transport = FakeTransport((403, b"error code: 1010"))
+    tr = OpenAICompatTranslator(resolve_provider("local"), transport=transport, rpm=0)
+
+    with pytest.raises(TranslationError, match="(?i)cloudflare"):
+        tr("page", "English")
+    assert len(transport.requests) == 1  # not retried: it fails identically
+
+
 # --------------------------------------------------------------------------
 # the response, before it is trusted
 # --------------------------------------------------------------------------

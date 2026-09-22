@@ -122,6 +122,25 @@ def resolve_out_dir(pdf: Path) -> Path:
     return per_doc
 
 
+def resolve_image_dir(out_dir: Path, stem: str) -> Path:
+    """Where this document's extracted figures live.
+
+    Named after the book (``<stem>_images``) rather than a bare ``images``, so
+    the folder still says which document it belongs to once it is copied out of
+    its parent or sat next to another book's.
+
+    An existing ``images/`` is adopted, for the same reason ``resolve_out_dir``
+    adopts a legacy output folder: chunk files are the progress record and are
+    never rewritten on resume, so a book that switched folders mid-run would
+    leave its earlier chunks linking ``images/`` and its later ones linking
+    somewhere else -- half the figures broken in a document that still reads
+    perfectly.
+    """
+    legacy = out_dir / "images"
+    if legacy.is_dir():
+        return legacy
+    return out_dir / f"{stem}_images"
+
 # --------------------------------------------------------------------------
 # persisted overlay
 # --------------------------------------------------------------------------

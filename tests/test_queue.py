@@ -85,6 +85,44 @@ def test_resolve_out_dir_ignores_another_documents_legacy_folder(
 
 
 # --------------------------------------------------------------------------
+# where a document's figures live
+# --------------------------------------------------------------------------
+def test_image_dir_is_named_after_the_book():
+    """Figures are namespaced by document, not dumped in a bare `images/`.
+
+    Every book's folder used to hold a directory called `images`, so the name
+    said nothing about which book it belonged to -- copy one out of its folder,
+    or drop two side by side, and there is no telling them apart.
+    """
+    out = bt_queue.OUTPUT_ROOT / "book"
+    out.mkdir(parents=True)
+
+    assert bt_queue.resolve_image_dir(out, "book") == out / "book_images"
+
+
+def test_an_existing_images_folder_is_adopted():
+    """A part-done book keeps the folder its written chunks already link.
+
+    Chunks are the progress record and are never rewritten on resume, so a run
+    that switched folders mid-book would leave the earlier chunks pointing at
+    `images/` and the later ones somewhere else. Same reasoning as
+    ``resolve_out_dir``: adopt the layout that is already on disk.
+    """
+    out = bt_queue.OUTPUT_ROOT / "book"
+    (out / "images").mkdir(parents=True)
+
+    assert bt_queue.resolve_image_dir(out, "book") == out / "images"
+
+
+def test_a_stray_images_file_does_not_pass_for_the_folder():
+    out = bt_queue.OUTPUT_ROOT / "book"
+    out.mkdir(parents=True)
+    (out / "images").write_text("not a folder", encoding="utf-8")
+
+    assert bt_queue.resolve_image_dir(out, "book") == out / "book_images"
+
+
+# --------------------------------------------------------------------------
 # attempts
 # --------------------------------------------------------------------------
 def test_progress_resets_the_attempt_counter():

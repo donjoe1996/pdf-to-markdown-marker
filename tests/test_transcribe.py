@@ -8,10 +8,12 @@ against real output instead.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import unquote
 
 import pytest
 
 from bt.transcribe import (
+    IMAGE_LINK,
     build_config,
     chunk_path,
     concatenate,
@@ -144,6 +146,38 @@ def test_unknown_image_link_is_left_alone(tmp_path):
     """A link marker did not produce is not ours to rewrite."""
     md = "![alt](https://example.com/a.png)\n"
     assert rewrite_image_links(md, {}, "images") == md
+
+
+def test_links_into_a_book_named_folder_are_url_escaped(tmp_path):
+    """A space in the folder name would truncate the link at that space.
+
+    The figure folder is now named after the book, and book names here contain
+    spaces (`2022_Esteban_TheVegetation CalakmulCampecheMexico`). A Markdown
+    link destination ends at the first space unless it is bracketed, so a raw
+    space silently yields a broken image beside prose that still reads fine --
+    and `IMAGE_LINK` itself would no longer match its own output. Percent
+    encoding keeps the file on disk named exactly as asked and the link valid
+    everywhere.
+    """
+    md = "![](_page_3_Figure_2.jpeg)\n"
+    mapping = save_images(
+        {"_page_3_Figure_2.jpeg": FakeImage()}, tmp_path / "images", "0000-0009"
+    )
+
+    out = rewrite_image_links(md, mapping, "A Book (1962)_images")
+
+    target = IMAGE_LINK.search(out).group(2)
+    assert target == "A%20Book%20%281962%29_images/0000-0009_page_3_Figure_2.jpeg"
+    assert unquote(target).startswith("A Book (1962)_images/")
+
+
+def test_a_plain_folder_name_is_left_as_it_reads(tmp_path):
+    """Escaping must not churn the names that were already fine."""
+    mapping = save_images(
+        {"_page_3_Figure_2.jpeg": FakeImage()}, tmp_path / "images", "0000-0009"
+    )
+    out = rewrite_image_links("![](_page_3_Figure_2.jpeg)\n", mapping, "book_images")
+    assert "![](book_images/0000-0009_page_3_Figure_2.jpeg)" in out
 
 
 def test_config_extracts_images_only_when_asked():

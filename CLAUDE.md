@@ -30,6 +30,7 @@ uv run python -m bt.verify output/NAME/NAME.md
 uv run python -m bt.postprocess output/NAME/raw.md --report  # tune transforms, write nothing
 
 uv run bt-transcribe --pdf FILE.pdf --images            # keep figures/charts too
+                                                        # -> output/NAME/NAME_images/
 uv run python -m bt.translate output/NAME/NAME.md --target English   # optional stage 4
 uv run python -m bt.translate FILE.md --provider local              # offline, no key
 ```
@@ -224,6 +225,21 @@ Saved under marker's own name the second overwrites the first and both chunks'
 Markdown then points at the same picture. `save_images()` prefixes the chunk
 bounds and rewrites the links; writes are atomic (temp name, same extension,
 then rename) for the same reason chunk writes are.
+
+**Figures live in `<book>_images/`, and the link is percent-encoded.** The
+folder used to be a bare `images/`, which said nothing about which book it
+belonged to once it was copied out or sat next to another one.
+`queue.resolve_image_dir()` is the single source of truth for the name — the
+GUI, `bt.run` and `bt.transcribe` all ask it, so they cannot disagree — and it
+adopts an existing `images/` so a part-done book keeps the folder its written
+chunks already link. Book names here contain spaces
+(`2022_Esteban_TheVegetation CalakmulCampecheMexico`), and a Markdown link
+destination **ends at the first space** unless it is bracketed, so
+`transcribe.link_target()` percent-encodes it: the file on disk keeps the name
+asked for and the link stays valid everywhere. An unescaped space would leave a
+broken image beside prose that still reads perfectly — and `IMAGE_LINK` would
+stop matching its own output, so a later pass could not even find the link to
+repair.
 
 **Footnote ids must be namespaced per page.** Footnote "1" recurs on nearly every
 page; un-namespaced ids would collide hundreds of times in one document.

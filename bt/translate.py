@@ -84,7 +84,9 @@ Rules:
   block quotes, and the blank lines between paragraphs.
 - Copy footnote markers and their definitions through unchanged, ids included
   (for example [^p13-1]). They are cross-references; renumbering one breaks it.
-- Copy image links through unchanged, path and all: ![](images/whatever.jpeg).
+- Copy image links through byte for byte, path and all, including any %XX
+  escapes in it. The folder is named after the book, so the path is not the
+  same in every document and an escape decoded back to a space breaks it.
 - Leave numbers, units, dates, measurements, bibliographic citations, author
   names, place names and scientific binomials (*Manilkara zapota*) as they are.
 - Translate the running prose, headings, table cells, figure captions and

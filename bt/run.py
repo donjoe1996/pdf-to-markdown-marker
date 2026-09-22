@@ -10,6 +10,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from bt.queue import resolve_image_dir
+
 # Source page 8 is book page 1 of the Being and Time scan: dense polytonic
 # Greek plus a half-page footnote block. Pages 40-41 are ordinary body spreads.
 # Only meaningful for that document; --pages covers any other.
@@ -50,9 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--images",
         action="store_true",
-        help="extract figures and charts to images/ beside the Markdown, linked "
-        "from it. Off by default: on a text-only book every 'figure' marker "
-        "finds is a false positive costing disk",
+        help="extract figures and charts to <book>_images/ beside the Markdown, "
+        "linked from it. Off by default: on a text-only book every 'figure' "
+        "marker finds is a false positive costing disk",
     )
     ap.add_argument(
         "--split-only", action="store_true", help="stop after stage 1 (no models needed)"
@@ -133,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         resume=not args.no_resume,
         ocr=not args.no_ocr,
         extract_images=args.images,
-        image_dir=out_dir / "images",
+        image_dir=resolve_image_dir(out_dir, args.pdf.stem),
     )
 
     # -- Stage 3: cleanup -------------------------------------------------

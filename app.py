@@ -128,8 +128,13 @@ def list_translation_models(provider_name: str, key_fingerprint: str, _api_key: 
 
 
 @st.cache_data(show_spinner="Building bundle…")
-def bundle_zip(md_path: str, image_paths: tuple[str, ...]) -> bytes:
+def bundle_zip(md_path: str, image_paths: tuple[str, ...], image_dir: str) -> bytes:
     """Markdown plus its images, laid out so the links still resolve.
+
+    ``image_dir`` is the folder name the Markdown actually links, not a
+    constant: figures live in a book-named folder now, and an older book keeps
+    its ``images/``. Hardcoding either would ship a bundle whose pictures are
+    all one directory away from where the document looks for them.
 
     Keyed on the file list rather than the folder so a new figure invalidates
     it; the zip is rebuilt, not served stale.
@@ -138,7 +143,7 @@ def bundle_zip(md_path: str, image_paths: tuple[str, ...]) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(md_path, Path(md_path).name)
         for image in image_paths:
-            zf.write(image, f"images/{Path(image).name}")
+            zf.write(image, f"{image_dir}/{Path(image).name}")
     return buf.getvalue()
 
 
@@ -439,8 +444,9 @@ with tab_transcribe:
             images = st.checkbox(
                 "Extract figures",
                 value=False,
-                help="Saves charts, plates and figures to images/ beside the "
-                "Markdown and links them from it. On a text-only book every "
+                help="Saves charts, plates and figures to a folder named after "
+                "the book beside the Markdown, and links them from it. On a "
+                "text-only book every "
                 "'figure' found is a false positive costing disk, so this is off "
                 "unless the document has them.",
             )
@@ -604,7 +610,8 @@ with tab_result:
             if not f.ok:
                 st.error(f"**{f.name}** — {f.detail}", icon=":material/warning:")
 
-        figures = sorted((out_dir / "images").glob("*.*"))
+        image_dir = bt_queue.resolve_image_dir(out_dir, pdf_path.stem)
+        figures = sorted(image_dir.glob("*.*"))
 
         downloads = st.container(horizontal=True, vertical_alignment="center")
         downloads.download_button(
@@ -620,7 +627,9 @@ with tab_result:
             # not the document -- a bundle is what someone can open elsewhere.
             downloads.download_button(
                 "Download bundle",
-                bundle_zip(str(result), tuple(str(f) for f in figures)),
+                bundle_zip(
+                    str(result), tuple(str(f) for f in figures), image_dir.name
+                ),
                 file_name=f"{pdf_path.stem}.zip",
                 mime="application/zip",
                 icon=":material/folder_zip:",
@@ -629,7 +638,8 @@ with tab_result:
         if figures:
             with st.expander(f"Figures ({len(figures)})"):
                 st.caption(
-                    f"`{out_dir.name}/images/` — linked from the Markdown by name."
+                    f"`{out_dir.name}/{image_dir.name}/` — linked from the "
+                    "Markdown by name."
                 )
                 grid = st.container(horizontal=True)
                 for f in figures[:8]:

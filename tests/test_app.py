@@ -182,6 +182,30 @@ def test_result_and_translate_sections_render(finished_book):
     )
 
 
+def test_a_book_named_figure_folder_is_found(finished_book):
+    """Figures live in `<book>_images/` now; `finished_book` still uses the
+    legacy `images/`, so between them both layouts are exercised.
+
+    The Result tab used to glob a literal `images/`. Against the new layout
+    that returns nothing, which is indistinguishable from a book that has no
+    figures: no gallery, no bundle button, and no error to say why.
+    """
+    pdf, out = finished_book
+    (out / "images").rename(out / "book_images")
+    (out / "book.md").write_text(
+        "<!-- page 0 -->\n\nUna página.\n\n"
+        "![](book_images/0000-0009_page_0_Figure_1.jpeg)\n",
+        encoding="utf-8",
+    )
+
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    result = _tab(at, "Result")
+    assert any("Figures" in e.label for e in result.expander)
+    assert any(b.label == "Download bundle" for b in result.download_button)
+
+
 def test_the_workflow_is_split_into_sections(finished_book):
     """REGRESSION: the whole app used to be one scroll column.
 

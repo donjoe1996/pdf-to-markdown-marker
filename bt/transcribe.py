@@ -38,6 +38,9 @@ import re  # noqa: E402
 import shutil  # noqa: E402
 import time  # noqa: E402
 from pathlib import Path  # noqa: E402
+from urllib.parse import quote  # noqa: E402
+
+from bt.queue import resolve_image_dir  # noqa: E402
 
 DEFAULT_CHUNK_SIZE = 20
 
@@ -71,7 +74,7 @@ def build_config(
     by default: on a text-only book every extracted "figure" is a false
     positive costing disk, and the original use here was a philosophy text with
     none. Turn it on for anything with charts -- the Markdown then carries
-    ``![](images/...)`` links to files written beside it.
+    ``![](<book>_images/...)`` links to files written beside it.
     """
     config: dict = {
         "output_format": "markdown",  # ConfigParser KeyErrors without this
@@ -168,6 +171,21 @@ def save_images(images: dict, image_dir: Path, prefix: str) -> dict[str, str]:
     return mapping
 
 
+def link_target(rel_dir: str, name: str) -> str:
+    """The link destination for a saved figure, escaped for Markdown.
+
+    The figure folder is named after the book, and book names here contain
+    spaces and brackets (`2022_Esteban_TheVegetation CalakmulCampecheMexico`).
+    A Markdown link destination ends at the first space unless it is bracketed,
+    so an unescaped name yields a broken image beside prose that still reads
+    perfectly -- and ``IMAGE_LINK`` would stop matching its own output, so a
+    second pass could not even find the link to repair. Percent encoding leaves
+    the file on disk named exactly as asked and keeps the link valid in every
+    renderer. Names that were already safe are unchanged.
+    """
+    return "/".join(quote(part, safe="") for part in (rel_dir, name))
+
+
 def rewrite_image_links(text: str, mapping: dict[str, str], rel_dir: str) -> str:
     """Point the Markdown's image links at the files that were actually written.
 
@@ -178,7 +196,7 @@ def rewrite_image_links(text: str, mapping: dict[str, str], rel_dir: str) -> str
         saved = mapping.get(m.group(2))
         if saved is None:
             return m.group(0)
-        return f"{m.group(1)}{rel_dir}/{saved}{m.group(3)}"
+        return f"{m.group(1)}{link_target(rel_dir, saved)}{m.group(3)}"
 
     return IMAGE_LINK.sub(swap, text)
 
@@ -203,10 +221,10 @@ def transcribe(
     and an existing chunk file is skipped on re-run.
 
     With ``extract_images``, figures are written to ``image_dir`` (by default
-    ``images/`` beside ``out_md``) and the chunk's Markdown is rewritten to
-    link them by their saved names.
+    the book-named folder beside ``out_md``; see ``queue.resolve_image_dir``)
+    and the chunk's Markdown is rewritten to link them by their saved names.
     """
-    images_at = image_dir or out_md.parent / "images"
+    images_at = image_dir or resolve_image_dir(out_md.parent, out_md.stem)
     rel_dir = images_at.name
     from marker.models import create_model_dict, shutdown_models
 
@@ -348,8 +366,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--images",
         action="store_true",
-        help="extract figures and charts to images/ beside the output, linked "
-        "from the Markdown",
+        help="extract figures and charts to <book>_images/ beside the output, "
+        "linked from the Markdown",
     )
     args = ap.parse_args(argv)
 

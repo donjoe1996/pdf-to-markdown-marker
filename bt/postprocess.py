@@ -1,6 +1,6 @@
 """Stage 3: clean marker's Markdown into a readable, citable text.
 
-Four independent transforms, each individually switchable so they can be tuned
+Five independent transforms, each individually switchable so they can be tuned
 against real output rather than guessed at:
 
 1. drop the running heads ("82  Being and Time  I. 2")
@@ -8,6 +8,8 @@ against real output rather than guessed at:
 3. namespace footnote markers per page (footnote "1" recurs on ~every page, so
    un-namespaced markers collide hundreds of times in one document)
 4. rejoin words hyphenated across line and page breaks
+5. reflow each paragraph onto one line (marker keeps the PDF's own line breaks;
+   on some born-digital PDFs that is a break after every word)
 
 Run with ``--report`` to see what each would change without writing anything.
 """
@@ -122,6 +124,25 @@ MD_FOOTNOTE_REF = re.compile(r"\[\^([0-9ivxIVX]{1,4})\]")
 HYPHEN_BREAK = re.compile(r"(\w)[-‐‑]\s*\n\s*(\w)")
 
 
+# Reflow. marker emits a newline wherever pdftext/surya ended a line, and its
+# markdownify keeps single newlines, so the Markdown carries the PDF's visual
+# line breaks. Markdown *renders* a single newline as a space, which is why this
+# looks fine in a viewer -- but as text it is wrong, and on some born-digital
+# PDFs (pdfium breaks after every word) a page becomes a column of single words.
+# Only plain prose is joined: a line Markdown reads as structure keeps its own.
+_INLINE_TAGS = r"(?:sup|sub|i|b|em|strong|a|span|math)\b"
+BLOCK_START = re.compile(
+    r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|>|\||!\[|\[\^[^\]]+\]:|<(?!/?" + _INLINE_TAGS + r"))"
+)
+# Lines that nothing may be appended to: a heading, table row, figure or HTML
+# block ends at its own newline.
+BLOCK_WHOLE_LINE = re.compile(r"^(?:#{1,6}\s|\||!\[|```|~~~|\$\$|<(?!/?" + _INLINE_TAGS + r"))")
+FENCE = re.compile(r"^(```|~~~|\$\$)")
+# A footnote marker opening a line: in a notes paragraph it starts the next note.
+NOTE_START = re.compile(r"^(?:<sup>[0-9ivxIVX]{1,4}</sup>|\[\^[0-9ivxIVX]{1,4}\])")
+TRAILING_HYPHEN = re.compile(r"\w[-‐‑]$")
+
+
 @dataclass
 class Stats:
     pages: int = 0
@@ -129,6 +150,7 @@ class Stats:
     margins_converted: int = 0
     footnotes_namespaced: int = 0
     hyphens_joined: int = 0
+    lines_joined: int = 0
     margin_sequence: list[int] = field(default_factory=list)
     head_forms: list[str] = field(default_factory=list)
 
@@ -143,6 +165,7 @@ class Stats:
             f"[H. n] anchors made  : {self.margins_converted}",
             f"footnotes namespaced : {self.footnotes_namespaced}",
             f"hyphen joins         : {self.hyphens_joined}",
+            f"line breaks reflowed : {self.lines_joined}",
         ]
         if self.head_forms:
             shown = ", ".join(repr(f) for f in self.head_forms[:4])
@@ -243,6 +266,64 @@ def join_hyphens(text: str, stats: Stats) -> str:
     return joined
 
 
+def _accepts_continuation(line: str) -> bool:
+    """Can the next prose line be appended to ``line``?"""
+    if line.endswith(("  ", "\\")):
+        return False  # an explicit Markdown hard break
+    s = line.strip()
+    if BLOCK_WHOLE_LINE.match(s):
+        return False
+    # A hyphen left at a line end is either a word split dehyphenation did not
+    # join (``hyphens=False``) or a deliberate one; a space would wreck both.
+    return not TRAILING_HYPHEN.search(s)
+
+
+def reflow_lines(page: str, stats: Stats) -> str:
+    """Join the soft line breaks inside each paragraph of one page.
+
+    Blank lines (paragraph breaks) are kept, fenced code and block math are
+    left verbatim, and a line that opens Markdown structure (heading, list item,
+    table row, quote, figure, HTML block, footnote definition) keeps its own
+    line. Inside a paragraph of footnotes -- one that *opens* with a marker --
+    each marker starts a new line, so every note stays its own definition;
+    anywhere else a marker opening a line is an inline reference that the PDF
+    happened to wrap before, and is joined back into its sentence.
+    """
+    out: list[str] = []
+    fence: str | None = None
+    at_para_start = True
+    notes_para = False
+    for line in page.split("\n"):
+        s = line.strip()
+        if fence is not None:
+            out.append(line)
+            if s.startswith(fence) and (fence != "$$" or s == "$$"):
+                fence = None
+            continue
+        m = FENCE.match(s)
+        if m and (m.group(1) != "$$" or s == "$$"):
+            fence = m.group(1)
+            out.append(line)
+            at_para_start = False
+            continue
+        if not s:
+            out.append(line)
+            at_para_start = True
+            continue
+        if at_para_start:
+            notes_para = bool(NOTE_START.match(s))
+            out.append(line)
+            at_para_start = False
+            continue
+        starts_block = BLOCK_START.match(s) or (notes_para and NOTE_START.match(s))
+        if not starts_block and _accepts_continuation(out[-1]):
+            out[-1] = f"{out[-1].rstrip()} {s}"
+            stats.lines_joined += 1
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def process(
     text: str,
     heads: bool = True,
@@ -253,6 +334,7 @@ def process(
     margins: bool = False,
     footnotes: bool = True,
     hyphens: bool = True,
+    reflow: bool = True,
 ) -> tuple[str, Stats]:
     stats = Stats()
     pages = split_pages(text)
@@ -269,6 +351,17 @@ def process(
             page = strip_running_head(page, head_forms, stats)
         if margins:
             page = convert_margin_numbers(page, stats)
+        # Per page, not on the joined document: an anchor sits between a page's
+        # last line and the next page's first, so HYPHEN_BREAK could never match
+        # across it anyway. It must precede reflow, which would otherwise put a
+        # space inside the split word.
+        if hyphens:
+            page = join_hyphens(page, stats)
+        # Before footnotes: namespacing reads a marker that opens a line as a
+        # definition, so a reference the PDF wrapped onto a new line would
+        # otherwise become a bogus note.
+        if reflow:
+            page = reflow_lines(page, stats)
         if footnotes:
             page = namespace_footnotes(page, page_no, stats)
         done.append((page_no, page.strip()))
@@ -281,8 +374,6 @@ def process(
         for page_no, body in done
         if body
     )
-    if hyphens:
-        out = join_hyphens(out, stats)
     # Collapse the runs of blank lines left behind by removed lines.
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out, stats
@@ -304,6 +395,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--no-footnotes", action="store_true")
     ap.add_argument("--no-hyphens", action="store_true")
+    ap.add_argument(
+        "--no-reflow",
+        action="store_true",
+        help="keep the PDF's line breaks instead of one line per paragraph",
+    )
     args = ap.parse_args(argv)
 
     text = args.src.read_text(encoding="utf-8")
@@ -313,6 +409,7 @@ def main(argv: list[str] | None = None) -> int:
         margins=args.margins,
         footnotes=not args.no_footnotes,
         hyphens=not args.no_hyphens,
+        reflow=not args.no_reflow,
     )
     print(stats.render())
 

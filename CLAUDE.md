@@ -62,7 +62,7 @@ edit is made.
 
 ```bash
 uv run ruff check .          # layer 0: undefined names, unused imports (~1s)
-uv run pytest                # fast suite, ~2s, 127 tests
+uv run pytest                # fast suite, ~2s, 182 tests
 uv run pytest -m slow        # Streamlit smoke tests (boot the app; ~1 min locally)
 uv run pytest -m ""          # everything, as CI runs it
 uv run pytest --golden-update   # rewrite golden files -- review the diff
@@ -137,7 +137,7 @@ at.selectbox[0].set_value("meditationsofmar00marc.pdf").run()
 | 1 | `split_spreads.py` | Cut 2-page spreads into single book pages (PyMuPDF) |
 | 2a | `warmup.py` | Pre-download every model before any timed spawn |
 | 2b | `transcribe.py` | Chunked, resumable OCR via marker |
-| 3 | `postprocess.py` | Strip heads, namespace footnotes, dehyphenate |
+| 3 | `postprocess.py` | Strip heads, namespace footnotes, dehyphenate, reflow paragraphs |
 | 4 | `translate.py` | **Optional.** Translate the finished Markdown via a free LLM endpoint |
 | — | `verify.py` | Quality checks on the finished Markdown |
 
@@ -240,6 +240,21 @@ asked for and the link stays valid everywhere. An unescaped space would leave a
 broken image beside prose that still reads perfectly — and `IMAGE_LINK` would
 stop matching its own output, so a later pass could not even find the link to
 repair.
+
+**marker keeps the PDF's line breaks; `postprocess` reflows them.** Each pdftext
+(or surya) line ends in a newline, and marker's markdownify preserves single
+newlines, so raw output carries the page's visual line breaks. On one
+born-digital book (`--no-ocr`) pdfium broke after *every word*, and the chunk
+files were a column of single words. Markdown renders a single newline as a
+space, so it looked fine in a viewer and was useless as text.
+`postprocess.reflow_lines()` joins soft breaks inside a paragraph and leaves
+structure alone (headings, list items, tables, quotes, figures, HTML, fences,
+hard breaks). It runs after dehyphenation (or it would put a space inside a
+split word) and **before footnote namespacing**, which reads any marker opening
+a line as a definition — a reference the PDF wrapped onto a new line used to
+become a bogus note. In a paragraph that *opens* with a marker, each marker
+still starts its own line, so a block of notes stays one definition per note.
+Chunk files and `raw.md` are untouched; only the final `.md` is reflowed.
 
 **Footnote ids must be namespaced per page.** Footnote "1" recurs on nearly every
 page; un-namespaced ids would collide hundreds of times in one document.

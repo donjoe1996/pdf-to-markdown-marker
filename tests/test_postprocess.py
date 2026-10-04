@@ -18,6 +18,7 @@ from bt.postprocess import (
     namespace_footnotes,
     normalise_head,
     process,
+    reflow_lines,
     split_pages,
 )
 from tests.conftest import marker_markdown
@@ -209,3 +210,92 @@ def test_image_links_are_not_stripped_as_running_heads():
 
     assert out.count("![](images/") == 8
     assert stats.heads_removed == 0
+
+
+# --------------------------------------------------------------------------
+# reflow: soft line breaks inside a paragraph
+# --------------------------------------------------------------------------
+WORDS = "On return, they told Drona the entire story. O king! Kounteya Arjuna".split()
+
+
+def test_reflow_joins_one_word_per_line():
+    """REGRESSION: a born-digital book came out one word per line.
+
+    With ``--no-ocr`` marker keeps every line break pdftext reports, and
+    markdownify preserves single newlines. On that PDF pdfium broke after every
+    word, so `0160-0169.md` was a column of single words. It still *rendered*
+    as prose -- Markdown folds a single newline into a space -- which is why it
+    looked fine in a viewer and was unusable as text (translation, grep, diff).
+    """
+    stats = Stats()
+    out = reflow_lines("\n".join(WORDS), stats)
+    assert out == " ".join(WORDS)
+    assert stats.lines_joined == len(WORDS) - 1
+
+
+def test_reflow_keeps_paragraph_breaks():
+    text = "first line\nwrapped here\n\nsecond para\nwrapped too"
+    assert reflow_lines(text, Stats()) == "first line wrapped here\n\nsecond para wrapped too"
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "# A heading\nBody right under it",
+        "- item one\n- item two",
+        "1. first\n2. second",
+        "| a | b |\n|---|---|\n| 1 | 2 |",
+        "> quoted\n> still quoted",
+        "![](book_images/0000-0009_page_3_Figure_2.jpeg)\nCaption under it",
+        "hard break  \nnext line",
+        "$$\nx = 1\n$$",
+        "<table>\n<tr><td>a</td></tr>\n</table>",
+    ],
+)
+def test_reflow_leaves_markdown_structure_alone(block):
+    """Only plain prose lines are joined; anything Markdown reads as structure
+    keeps its own line, or it would stop being that structure."""
+    assert reflow_lines(block, Stats()).split("\n")[0] == block.split("\n")[0]
+
+
+def test_reflow_does_not_touch_fenced_code():
+    code = "```\nline one\nline two\n\nline four\n```"
+    assert reflow_lines(code, Stats()) == code
+
+
+def test_reflow_joins_list_item_continuations():
+    assert reflow_lines("- an item that\nwraps", Stats()) == "- an item that wraps"
+
+
+def test_inline_footnote_ref_at_line_start_stays_a_reference():
+    """A wrapped line can begin with a reference (`on?<sup>366</sup> He ...`
+    broken before the marker). Left on its own line, namespacing reads any
+    marker that opens a line as a *definition* and adds a colon -- a reference
+    in the middle of a sentence silently becomes a bogus footnote."""
+    out, _ = process(marker_markdown(["while he looked on?\n<sup>366</sup>\nHe has a power"]))
+    assert "on?[^p0-366] He has a power" in out or "on? [^p0-366] He has a power" in out
+    assert "[^p0-366]:" not in out
+
+
+def test_footnote_block_keeps_one_note_per_line():
+    """A footnote paragraph lists several notes, each its own definition."""
+    text = "<sup>1</sup> First note\nwraps here.\n<sup>2</sup> Second note."
+    out = reflow_lines(text, Stats())
+    assert out == "<sup>1</sup> First note wraps here.\n<sup>2</sup> Second note."
+
+
+def test_reflow_without_dehyphenation_does_not_split_words_with_a_space():
+    out, _ = process(marker_markdown(["a hyphen-\nbreak"]), hyphens=False)
+    assert "hyphen- break" not in out
+
+
+def test_process_reflows_word_per_line_page():
+    pages = ["\n".join(WORDS) + "\n\nNext\nparagraph."]
+    out, stats = process(marker_markdown(pages))
+    assert " ".join(WORDS) + "\n\nNext paragraph." in out
+    assert stats.lines_joined == len(WORDS)
+
+
+def test_reflow_can_be_turned_off():
+    out, _ = process(marker_markdown(["\n".join(WORDS)]), reflow=False)
+    assert "\n".join(WORDS) in out

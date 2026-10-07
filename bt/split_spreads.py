@@ -28,6 +28,15 @@ PROBE_DPI = 36
 # The gutter is searched only in the middle of the page so that the wide blank
 # outer margins can never win.
 SEARCH_LO, SEARCH_HI = 0.35, 0.65
+# A column is blank when its ink is below this share of a typical text
+# column's (the 95th percentile of the profile). Not "exactly zero": a scan's
+# gutter carries dust and toner specks, and one faint speck would otherwise
+# split the gutter in two.
+BLANK_COLUMN_FRACTION = 0.05
+# A flatbed leaves a dark binding shadow at the fold, splitting the gutter's
+# blank strip in two. A dark strip at most this wide (fraction of width) with
+# blank on both sides is treated as part of the gutter, not as content.
+FOLD_MAX_WIDTH = 0.01
 # A half holding less than this share of the spread's ink is blank (6 such
 # halves exist in this book: source pages 0, 2, 8, 9, 32, 250).
 BLANK_INK_FRACTION = 0.02
@@ -44,19 +53,33 @@ class PageRecord:
 
 
 def _ink_profile(page: pymupdf.Page) -> np.ndarray:
-    """Count dark pixels per pixel-column."""
+    """Sum the darkness of each pixel-column, measured against the paper.
+
+    Darkness is *summed*, not thresholded. Rendering a 300 DPI bitonal scan at
+    ``PROBE_DPI`` averages each ~8x8 block into one pixel, so a thin black
+    stroke becomes light grey; a ``< 128`` test then saw body text as no ink at
+    all, and the "widest blank run" landed inside a page of text (Boyce,
+    1975, page 90: cut at 60.6%). Averaging preserves the sum, so summed
+    darkness sees the same ink at any probe resolution.
+
+    The paper level is taken as the 90th percentile pixel -- most of any page
+    is paper -- so a grey or yellowed scan background does not read as ink.
+    """
     pm = page.get_pixmap(dpi=PROBE_DPI, colorspace=pymupdf.csGRAY)
     arr = np.frombuffer(pm.samples, dtype=np.uint8).reshape(pm.height, pm.stride)
-    arr = arr[:, : pm.width]  # drop row padding
-    return (arr < 128).sum(axis=0)
+    arr = arr[:, : pm.width].astype(np.int64)  # drop row padding
+    paper = int(np.percentile(arr, 90))
+    return np.clip(paper - arr, 0, None).sum(axis=0)
 
 
 def find_gutter(ink: np.ndarray) -> tuple[float, float]:
     """Return ``(gutter position, blank band width)``, both as fractions of width.
 
-    Uses the *widest* run of zero-ink columns in the central band. Taking
+    Uses the *widest* run of blank columns in the central band. Taking
     ``argmin`` instead does not work: the entire gutter reads zero, so argmin
     returns whichever zero it meets first and drifts toward the band edge.
+    "Blank" is relative to the text (``BLANK_COLUMN_FRACTION``), not zero, and
+    a binding shadow narrower than ``FOLD_MAX_WIDTH`` does not split the run.
 
     The band width is the confidence signal: a real gutter shows a sustained
     blank strip, while a single-page document has only incidental gaps between
@@ -64,19 +87,31 @@ def find_gutter(ink: np.ndarray) -> tuple[float, float]:
     """
     width = len(ink)
     lo, hi = int(width * SEARCH_LO), int(width * SEARCH_HI)
-    blank = ink[lo:hi] == 0
+    floor = BLANK_COLUMN_FRACTION * float(np.percentile(ink, 95))
+    blank = ink[lo:hi] <= floor
 
-    best_len = best_start = 0
-    run = start = 0
+    runs: list[list[int]] = []  # [start, end) of each blank run
     for i, is_blank in enumerate(blank):
-        if is_blank:
-            if run == 0:
-                start = i
-            run += 1
-            if run > best_len:
-                best_len, best_start = run, start
+        if not is_blank:
+            continue
+        if runs and runs[-1][1] == i:
+            runs[-1][1] = i + 1
         else:
-            run = 0
+            runs.append([i, i + 1])
+
+    # Bridge a binding shadow: a narrow dark strip between two blank runs.
+    fold = max(1, round(width * FOLD_MAX_WIDTH))
+    merged: list[list[int]] = []
+    for run in runs:
+        if merged and run[0] - merged[-1][1] <= fold:
+            merged[-1][1] = run[1]
+        else:
+            merged.append(run)
+
+    best_start, best_len = 0, 0
+    for start, end in merged:
+        if end - start > best_len:
+            best_start, best_len = start, end - start
 
     if best_len == 0:
         return 0.5, 0.0  # no clear gutter; fall back to the midpoint

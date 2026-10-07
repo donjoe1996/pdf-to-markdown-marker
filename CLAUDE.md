@@ -62,7 +62,7 @@ edit is made.
 
 ```bash
 uv run ruff check .          # layer 0: undefined names, unused imports (~1s)
-uv run pytest                # fast suite, ~2s, 182 tests
+uv run pytest                # fast suite, ~2s, 188 tests
 uv run pytest -m slow        # Streamlit smoke tests (boot the app; ~1 min locally)
 uv run pytest -m ""          # everything, as CI runs it
 uv run pytest --golden-update   # rewrite golden files -- review the diff
@@ -168,6 +168,18 @@ Each of these cost real debugging time. Read before changing related code.
 **Gutter detection must use the widest zero-ink *run*, not `argmin`.** The whole
 gutter reads zero, so `argmin` returns the first zero it meets and drifts to the
 band edge.
+
+**Gutter ink is *summed darkness*, not a count of pixels darker than 128.**
+The probe renders at 36 DPI, which averages each ~8x8 block of a 300 DPI
+bitonal scan into one pixel, so thin black strokes become light grey. The
+threshold count saw body text as no ink at all, and the "widest blank run" fell
+inside a page of text (Boyce 1975, page 90: cut at 60.6% of width, reporting a
+5.8% "blank band"). Averaging preserves the sum, so summed darkness does not.
+Vector-text fixtures never showed this -- their strokes stay solid -- which is
+why `make_bitonal_spread` builds a real thresholded scan. Two related rules:
+"blank" means below 5% of a typical text column (scan specks are not zero), and
+a dark strip under 1% of the width between blank runs is the binding shadow,
+part of the gutter -- without that it halved the band below `SPREAD_MIN_BAND`.
 
 **Splitting uses `set_cropbox`, deliberately.** It is lossless, so marker
 resamples the original scan exactly once. Rasterising here would resample twice.

@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pymupdf
 import pytest
 
@@ -190,6 +191,59 @@ def make_scan_pdf(tmp_path):
         doc.save(path)
         doc.close()
         return path
+
+    return build
+
+
+@pytest.fixture
+def make_bitonal_spread(tmp_path):
+    """Build a spread the way a 300 DPI bitonal scanner stores one.
+
+    Text is rendered at 300 DPI, thresholded to pure black and white, and
+    placed as a single full-page image -- with a tight gutter and the dark
+    binding shadow a flatbed leaves at the fold. Vector-text fixtures cannot
+    reproduce the splitter's real failure: their strokes stay solid when the
+    probe renders at low DPI, while a bitonal scan's thin strokes average out
+    to light grey and vanish.
+
+    Returns ``(path, (left_text_end, right_text_start))`` as fractions of width:
+    a correct cut lies between the two.
+    """
+
+    def build(
+        name: str = "bitonal.pdf", blank_left: bool = False
+    ) -> tuple[Path, tuple[float, float]]:
+        width, height = 800, 500
+        left_end, fold, right_start = 372, 382, 392
+        prose = "Through his thoughts and the gaze of his eyes, the offering. " * 30
+
+        scratch = pymupdf.open()
+        drawn = scratch.new_page(width=width, height=height)
+        if not blank_left:
+            drawn.insert_textbox(
+                pymupdf.Rect(40, 40, left_end, 460), prose, fontsize=7
+            )
+        drawn.insert_textbox(
+            pymupdf.Rect(right_start, 40, 760, 460), prose, fontsize=7
+        )
+        drawn.draw_line((fold, 0), (fold, height), width=2)
+        grey = drawn.get_pixmap(dpi=300, colorspace=pymupdf.csGRAY)
+        scratch.close()
+
+        samples = np.frombuffer(grey.samples, dtype=np.uint8)
+        pixels = samples.reshape(grey.height, grey.stride)[:, : grey.width]
+        bitonal = np.where(pixels < 128, 0, 255).astype(np.uint8)
+        image = pymupdf.Pixmap(
+            pymupdf.csGRAY, grey.width, grey.height, bitonal.tobytes(), False
+        )
+
+        doc = pymupdf.open()
+        page = doc.new_page(width=width, height=height)
+        page.insert_image(page.rect, pixmap=image)
+        path = tmp_path / name
+        doc.save(path)
+        doc.close()
+        return path, (left_end / width, right_start / width)
 
     return build
 

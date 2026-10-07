@@ -11,6 +11,7 @@ import pymupdf
 
 from bt.split_spreads import (
     SPREAD_MIN_BAND,
+    _ink_profile,
     detect_spreads,
     find_gutter,
     split_document,
@@ -47,6 +48,76 @@ def test_find_gutter_ignores_wide_outer_margins():
     ink = profile((0, 120), (9, 40), (0, 20), (9, 40), (0, 80))
     position, _ = find_gutter(ink)
     assert 0.35 < position < 0.65
+
+
+def test_find_gutter_tolerates_a_speck_in_the_gutter():
+    """A scan's gutter is rarely *exactly* empty: dust and toner specks land
+    there. Requiring zero ink let one faint speck split the gutter in two and
+    halve its measured width. Blank means negligible next to the text.
+    """
+    ink = profile((900, 105), (0, 20), (10, 1), (0, 20), (900, 154))
+    position, band = find_gutter(ink)
+    assert abs(position - (105 + 41 / 2) / 300) < 0.01
+    assert abs(band - 41 / 300) < 0.005
+
+
+def test_find_gutter_bridges_a_binding_shadow():
+    """A flatbed scan leaves a dark line at the fold (visible in the Boyce
+    preview). It split the gutter into two half-width runs, so the cut sat
+    against one page's text and the band could fall below SPREAD_MIN_BAND,
+    making ``detect_spreads`` reject a genuine spread.
+    """
+    ink = profile((900, 110), (0, 15), (5000, 2), (0, 15), (900, 158))
+    position, band = find_gutter(ink)
+    assert abs(position - (110 + 32 / 2) / 300) < 0.01
+    assert abs(band - 32 / 300) < 0.005
+
+
+def test_find_gutter_does_not_bridge_a_text_column():
+    """Only a *narrow* dark strip is a fold; a block of text is a page."""
+    ink = profile((900, 100), (0, 6), (900, 20), (0, 30), (900, 144))
+    position, band = find_gutter(ink)
+    assert abs(position - (126 + 30 / 2) / 300) < 0.01
+    assert abs(band - 30 / 300) < 0.005
+
+
+def test_bitonal_scan_is_cut_in_the_gutter(make_bitonal_spread):
+    """REGRESSION: Boyce, *A History of Zoroastrianism* (1975), page 90.
+
+    The GUI preview cut that spread at 60.6% of width, reporting a "blank band"
+    5.8% wide -- in the middle of the right-hand page's text. The probe counted
+    pixels darker than 128 at 36 DPI, but a 300 DPI bitonal scan's thin strokes
+    average out to light grey at that resolution, so body text registered as no
+    ink at all and the "widest blank run" could fall anywhere. Ink must be
+    measured as summed darkness, which downsampling preserves.
+    """
+    path, (left_end, right_start) = make_bitonal_spread()
+    with pymupdf.open(path) as doc:
+        ink = _ink_profile(doc[0])
+    position, band = find_gutter(ink)
+    assert left_end <= position <= right_start
+    assert band >= SPREAD_MIN_BAND, "the binding shadow must not halve the gutter"
+
+
+def test_blank_half_beside_a_binding_shadow_is_dropped(make_bitonal_spread, tmp_path):
+    """Summed darkness counts the fold shadow as ink -- about a tenth of a
+    text page's, far above BLANK_INK_FRACTION. It must still land with the
+    text half: on a spread with one blank page the widest blank run is that
+    page, so the cut falls beside the shadow, not through it. If gutter
+    selection ever changes, this is what keeps an empty page out of OCR.
+    """
+    path, _ = make_bitonal_spread(blank_left=True)
+    records = split_document(path, tmp_path / "pages.pdf", None)
+    assert [r.half for r in records] == ["right"]
+
+
+def test_bitonal_scan_body_text_registers_as_ink(make_bitonal_spread):
+    """The root cause, pinned directly: every column under body text has ink."""
+    path, (left_end, _) = make_bitonal_spread()
+    with pymupdf.open(path) as doc:
+        ink = _ink_profile(doc[0])
+    text = ink[int(len(ink) * 0.1) : int(len(ink) * (left_end - 0.02))]
+    assert (text > 0).all()
 
 
 def test_detect_spreads_true_for_landscape_with_a_gutter(make_pdf):

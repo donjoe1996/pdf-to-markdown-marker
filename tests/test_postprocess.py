@@ -299,3 +299,183 @@ def test_process_reflows_word_per_line_page():
 def test_reflow_can_be_turned_off():
     out, _ = process(marker_markdown(["\n".join(WORDS)]), reflow=False)
     assert "\n".join(WORDS) in out
+
+
+# --------------------------------------------------------------------------
+# hyphenation decided by evidence, not by rule
+# --------------------------------------------------------------------------
+def test_compound_broken_at_its_own_hyphen_keeps_the_hyphen():
+    """A line break after a hyphen is not always a split word.
+
+    Typesetters break a compound *at its hyphen*, so "Being-in-\\nthe-world"
+    carries a real hyphen at the line end. Deleting every line-end hyphen
+    produced "Being-inthe-world" -- in a book whose vocabulary is built from
+    such compounds, a wrong word on most pages that no check could see.
+    """
+    out, stats = process(marker_markdown(["the Being-in-\nthe-world of Dasein."]))
+    assert "Being-in-the-world" in out
+    assert stats.hyphens_kept == 1
+
+
+def test_hyphen_kept_when_the_document_spells_the_compound_elsewhere():
+    """The document is its own dictionary: "self-evident" printed intact on
+    one page says how the same word broken across a line should be spelled."""
+    pages = ["It is self-evident that this holds.", "This too is self-\nevident here."]
+    out, _ = process(marker_markdown(pages))
+    assert "selfevident" not in out
+    assert out.count("self-evident") == 2
+
+
+def test_hyphen_dropped_when_the_document_spells_the_word_solid():
+    pages = ["An understanding of it.", "Our under-\nstanding grows."]
+    out, stats = process(marker_markdown(pages))
+    assert "Our understanding grows." in out
+    assert stats.hyphens_joined == 1
+
+
+@pytest.mark.parametrize(
+    ("broken", "expected"),
+    [
+        ("the Anglo-\nSaxon world", "Anglo-Saxon"),  # capital after the hyphen
+        ("the war of 1914-\n18 ended", "1914-18"),  # a number range
+    ],
+)
+def test_hyphen_kept_before_capitals_and_digits(broken, expected):
+    out, _ = process(marker_markdown([broken]))
+    assert expected in out
+
+
+def test_soft_hyphen_at_line_end_always_joins():
+    """U+00AD is the typesetter saying outright "this is a split word"."""
+    out, _ = process(marker_markdown(["a Being-in-the-world and a hy­\nphen."]))
+    assert "a hyphen." in out
+    assert "­" not in out
+
+
+# --------------------------------------------------------------------------
+# paragraphs and words split across a page break
+# --------------------------------------------------------------------------
+def test_sentence_split_across_pages_is_rejoined():
+    """A page break mid-sentence used to leave two paragraph fragments.
+
+    The anchor sat between them, so the reader saw a paragraph end without a
+    full stop and another begin in lower case; translation, which works a page
+    at a time, received two half-sentences. The continuation now moves back to
+    the paragraph it belongs to, ahead of that page's footnotes.
+    """
+    pages = [
+        "A first paragraph.\n\nThe sentence runs on and<sup>1</sup>\n\n<sup>1</sup> A note.",
+        "continues over the page.\n\nA new paragraph.",
+    ]
+    out, stats = process(marker_markdown(pages))
+    assert "The sentence runs on and[^p0-1] continues over the page." in out
+    assert stats.pages_bridged == 1
+    # the note still follows the joined paragraph, and both anchors survive
+    assert out.index("continues over the page.") < out.index("[^p0-1]: A note.")
+    assert [n for n, _ in split_pages(out)] == [0, 1]
+    assert "<!-- page 1 -->\n\nA new paragraph." in out
+
+
+def test_word_split_across_pages_is_rejoined():
+    """CLAUDE.md recorded this as a known cost of page anchors: 6 cross-page
+    hyphen joins lost in one book."""
+    pages = ["It was an under-", "standing of sorts.\n\nNext."]
+    out, _ = process(marker_markdown(pages))
+    assert "It was an understanding of sorts." in out
+
+
+@pytest.mark.parametrize(
+    ("end", "start"),
+    [
+        ("A finished sentence.", "lower case opens the next page."),
+        ("An unfinished line", "Capital opens the next page."),
+        ("An unfinished line", "- a list item"),
+        ("# A heading", "body under it"),
+        ("| a | b |", "prose after a table"),
+    ],
+)
+def test_page_break_is_kept_unless_the_text_clearly_continues(end, start):
+    """Both halves must agree: no sentence end before, lower case after."""
+    out, stats = process(marker_markdown([end, start]))
+    assert stats.pages_bridged == 0
+    assert f"<!-- page 1 -->\n\n{start}" in out
+
+
+def test_bridging_can_be_turned_off():
+    out, stats = process(marker_markdown(["runs on and", "continues."]), bridge=False)
+    assert stats.pages_bridged == 0
+    assert "<!-- page 1 -->\n\ncontinues." in out
+
+
+# --------------------------------------------------------------------------
+# running heads that change with the chapter
+# --------------------------------------------------------------------------
+def _chapter_book() -> str:
+    """40 pages, four chapters; every page opens with its chapter's title."""
+    titles = ["The First Matter", "A Second Question", "Third Things", "Last Words"]
+    pages = [
+        f"{titles[i // 10]}\n\nBody text unique to page {i}, a full sentence."
+        for i in range(40)
+    ]
+    return marker_markdown(pages)
+
+
+def test_chapter_running_heads_are_removed():
+    """A head that changes every chapter never reaches 30% of the book.
+
+    Each title here sits on 25% of pages, so the whole-book frequency rule
+    kept all forty -- a chapter title interrupting the text at the top of
+    every page. A head is a line repeating at the edge of *neighbouring*
+    pages; that is local evidence and needs no share of the whole book.
+    """
+    out, stats = process(_chapter_book())
+    assert stats.heads_removed == 40
+    assert "Third Things" not in out
+    assert "Body text unique to page 25" in out
+
+
+def test_chapter_heading_survives_its_own_running_heads():
+    """The run starts at the chapter's title page. That first line is the
+    heading itself, not a head -- deleting it would lose the chapter title."""
+    pages = [f"Earlier matter {i} ends here." for i in range(3)]
+    pages += ["# Third Things\n\nThe chapter opens with a sentence."]
+    pages += [f"Third Things\n\nBody text unique to page {i}, a sentence." for i in range(6)]
+    out, stats = process(marker_markdown(pages))
+    assert out.count("Third Things") == 1
+    assert "# Third Things" in out
+    assert stats.heads_removed == 6
+
+
+def test_book_title_survives_being_its_own_running_head():
+    """The same protection for the whole-book rule: a head that repeats the
+    book's title normalises to the title-page heading, which was deleted with
+    the heads."""
+    pages = ["# A Placeholder Title\n\nBy an author, with a sentence."]
+    pages += [f"A Placeholder Title\n\nBody text unique to page {i}, a sentence." for i in range(9)]
+    out, stats = process(marker_markdown(pages))
+    assert out.count("A Placeholder Title") == 1
+    assert stats.heads_removed == 9
+
+
+def test_a_line_repeated_on_distant_pages_is_not_a_head():
+    pages = [f"Body text unique to page {i}, a full sentence." for i in range(40)]
+    for i in (3, 17, 31):
+        pages[i] = "A Recurring Motto\n\n" + pages[i]
+    out, stats = process(marker_markdown(pages))
+    assert out.count("A Recurring Motto") == 3
+    assert stats.heads_removed == 0
+
+
+# --------------------------------------------------------------------------
+# characters
+# --------------------------------------------------------------------------
+def test_ligatures_and_invisible_characters_are_normalised():
+    """A text layer hands back the font's glyphs, not the letters.
+
+    "ﬁnd" does not match a search for "find", and a zero-width space inside a
+    word splits it for every tool while rendering as nothing.
+    """
+    raw = "the ﬁrst ﬂow of été with zero​width and no break"
+    out, stats = process(marker_markdown([raw]))
+    assert "the first flow of été with zerowidth and no break" in out
+    assert stats.chars_cleaned > 0

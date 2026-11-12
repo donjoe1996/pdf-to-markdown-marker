@@ -177,6 +177,10 @@ def test_result_and_translate_sections_render(finished_book):
     result = _tab(at, "Result")
     assert any(b.label == "Download Markdown" for b in result.download_button)
     assert any("Figures" in e.label for e in result.expander)
+    # The fixture's two short pages stand against a PDF page full of text, so
+    # the per-page audit must be on screen and must have something to say.
+    audit = next(m for m in result.metric if m.label == "page audit")
+    assert audit.value == "FAIL"
     assert any(
         b.label.startswith("Translate to") for b in _tab(at, "Translate").button
     )

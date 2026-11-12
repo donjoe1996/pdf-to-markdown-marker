@@ -34,6 +34,16 @@ os.environ.setdefault("DETECTOR_SERVER_STARTUP_TIMEOUT", "1800")
 os.environ.setdefault("FAST_LAYOUT_SERVER_STARTUP_TIMEOUT", "1800")
 os.environ.setdefault("SURYA_INFERENCE_STARTUP_TIMEOUT", "1800")
 
+# When a page's output loops or fails to parse, surya's default is to redo the
+# page block by block. Its own docstring says what that costs: "tight block
+# crops lose context the model needs", and a block that loops again is dropped
+# outright -- the page just comes out shorter. With this set, the *whole page*
+# is first regenerated at rising temperature, so a failed page still gets a
+# full-page reading and falls back to blocks only if every attempt fails. It
+# touches only pages whose first pass already failed; set it to 0 to get
+# surya's default back.
+os.environ.setdefault("SURYA_FULLPAGE_REGEN", "1")
+
 import re  # noqa: E402
 import shutil  # noqa: E402
 import time  # noqa: E402

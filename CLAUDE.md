@@ -26,7 +26,8 @@ uv run python -m bt.analyze FILE.pdf      # spreads? OCR needed? time estimate?
 uv run bt-transcribe --pdf FILE.pdf                 # full run, resumable
 uv run bt-transcribe --pdf FILE.pdf --split-only    # stage 1 only; no models needed
 uv run bt-transcribe --pdf FILE.pdf --no-split --no-ocr   # single pages, text-layer extract
-uv run python -m bt.verify output/NAME/NAME.md
+uv run python -m bt.verify output/NAME/NAME.md --pdf output/NAME/pages.pdf
+uv run python -m bt.audit output/NAME/raw.md --pdf output/NAME/pages.pdf  # which pages lost text
 uv run python -m bt.postprocess output/NAME/raw.md --report  # tune transforms, write nothing
 
 uv run bt-transcribe --pdf FILE.pdf --images            # keep figures/charts too
@@ -62,7 +63,7 @@ edit is made.
 
 ```bash
 uv run ruff check .          # layer 0: undefined names, unused imports (~1s)
-uv run pytest                # fast suite, ~2s, 188 tests
+uv run pytest                # fast suite, ~2s, 220 tests
 uv run pytest -m slow        # Streamlit smoke tests (boot the app; ~1 min locally)
 uv run pytest -m ""          # everything, as CI runs it
 uv run pytest --golden-update   # rewrite golden files -- review the diff
@@ -137,9 +138,10 @@ at.selectbox[0].set_value("meditationsofmar00marc.pdf").run()
 | 1 | `split_spreads.py` | Cut 2-page spreads into single book pages (PyMuPDF) |
 | 2a | `warmup.py` | Pre-download every model before any timed spawn |
 | 2b | `transcribe.py` | Chunked, resumable OCR via marker |
-| 3 | `postprocess.py` | Strip heads, namespace footnotes, dehyphenate, reflow paragraphs |
+| 3 | `postprocess.py` | Clean characters, strip heads, namespace footnotes, dehyphenate, reflow, bridge page breaks |
 | 4 | `translate.py` | **Optional.** Translate the finished Markdown via a free LLM endpoint |
 | — | `verify.py` | Quality checks on the finished Markdown |
+| — | `audit.py` | Per-page completeness: which pages lost, repeated or never got text |
 
 `transcribe.py` and `warmup.py` set env vars **at import time, before torch is
 imported**. Keep marker/torch imports function-local in those modules — hoisting
@@ -220,9 +222,10 @@ per-page footnote namespacing.
 never sees it, but `verify.check_not_embedded_layer` aligns output pages to PDF
 pages by those numbers. An earlier version deleted them, which silently turned
 the most important check into a no-op: it reported "ok / no meaningful embedded
-text" for a whole 256-page book — a pass that proved nothing. Anchors also cost
-cross-page hyphen joins (6 in that book), since the anchor now sits between the
-split halves.
+text" for a whole 256-page book — a pass that proved nothing. The anchor sits
+between a page's last line and the next page's first, so the per-page hyphen
+join cannot reach across it (6 lost in that book); `bridge_pages()` does that
+join now.
 
 **Image links must survive running-head removal.** `_could_be_head()` rejects any
 line containing `](`. Extracted figures are named by page and figure number, so
@@ -268,6 +271,49 @@ become a bogus note. In a paragraph that *opens* with a marker, each marker
 still starts its own line, so a block of notes stays one definition per note.
 Chunk files and `raw.md` are untouched; only the final `.md` is reflowed.
 
+**A line-end hyphen is not always a split word.** `join_hyphens()` used to
+delete every one, which turns "Being-in-/the-world" into "Being-inthe-world" --
+in a book whose vocabulary is built from such compounds. The decision is now
+made per word from `postprocess.Vocabulary`, the document's own spellings:
+whichever form (solid or hyphenated) it prints intact elsewhere wins. With no
+evidence, a token already carrying a hyphen keeps this one (compounds are
+broken at their hyphens) and a plain word is joined; a capital or a digit after
+the break always keeps it ("Anglo-/Saxon", "1914-/18"). No dictionary is used,
+because the terms that matter exist in no dictionary.
+
+**Page breaks are bridged by moving text *back*, never by moving the anchor.**
+`bridge_pages()` rejoins the sentence (or word) a page break cut by appending
+the next page's opening fragment to the last *body* paragraph of the previous
+page -- ahead of that page's footnotes. The anchor still stands alone on its
+line, so `split_pages()`, `verify` and `bt.translate` are unaffected; an anchor
+inside a paragraph would start an HTML block and break the paragraph anyway.
+Both halves must agree before anything moves: no sentence end before the break,
+a lower-case letter after it. A wrong join fuses two paragraphs, which is worse
+than the split. It runs last, after heads are stripped (so a page's first line
+is really its text) and footnotes namespaced (so notes can be told from body).
+
+**Running heads have two rules, and the local one is stricter about position.**
+The frequency rule (30% of pages) cannot see a head that changes each chapter,
+so `find_local_heads()` also convicts a line that repeats on *neighbouring*
+pages (3 in a run, gap of 2 for verso/recto alternation) -- but only as the
+very first or last line, and never on a one-line page. The first line of a run
+is kept when it is a Markdown heading: that is the chapter title itself.
+
+**marker drops text silently; `bt.audit` is how it gets noticed.** Read from
+marker/surya's source: a full-page output that loops is redone block by block,
+a block that loops again is dropped with only a log line, and output that hits
+the token budget is accepted truncated. Each leaves fluent Markdown with less
+text on one page, which no whole-document check can see. `audit_pages()`
+measures every page against the PDF's own text layer by *count of letters and
+digits* -- the characters of a bad layer are wrong but their number is about
+right -- and, where there is no layer, against the page's ink. Missing, extra
+and repeated text fail verification; ink-without-text is only reported, since
+it is usually a plate. `SURYA_FULLPAGE_REGEN=1` (set in `transcribe.py`) makes
+surya retry a failed page as a whole page before falling back to blocks.
+**That setting is taken from surya's source and has not been measured on this
+machine** -- it only acts on pages whose first pass failed, but if such pages
+turn out slow, `SURYA_FULLPAGE_REGEN=0` restores the default.
+
 **Footnote ids must be namespaced per page.** Footnote "1" recurs on nearly every
 page; un-namespaced ids would collide hundreds of times in one document.
 
@@ -301,6 +347,11 @@ unchanged; `at.tabs[i].label` addresses a section in a test.
 and no `base`, so it follows the browser. Colour is reserved for state —
 running, stopped, failed — and structure comes from borders and spacing:
 this page is watched for hours while a book transcribes.
+
+**Verification is cached per version of the Markdown** (`cached_findings`,
+keyed on the mtimes of the Markdown and the PDF). The page audit reads every
+page of the PDF, and Streamlit re-executes the script on every interaction;
+uncached, each click on the Result tab would re-audit the whole book.
 
 **Why it runs a subprocess.** Streamlit re-executes its script on every
 interaction, so a long job cannot live inside the app. `bt/jobs.py` launches

@@ -349,7 +349,18 @@ Raw OCR output is accurate but not yet comfortable to read:
   line, so it must also look like a label rather than a sentence.
 - **Footnote markers are renumbered per page.** Almost every page has a footnote
   "1", and in one long document those would all collide.
-- **Words broken across a line break** are rejoined.
+- **Words broken across a line break** are rejoined — and a hyphen that is part
+  of the word is kept. "under-/standing" is a split word; "Being-in-/the-world"
+  is a compound broken at its own hyphen. The document decides: whichever
+  spelling it prints intact elsewhere is the spelling of the broken one.
+- **A sentence cut by a page break** is put back together, so a paragraph no
+  longer ends without a full stop at the foot of one page and restarts in lower
+  case on the next.
+- **Chapter-specific running heads** are removed as well. A head that changes
+  every chapter never appears on enough of the *book* to be caught by
+  frequency, so repetition on neighbouring pages counts too.
+- **Glyphs become letters**: ligatures (`ﬁ` → `fi`), decomposed accents and
+  invisible characters, which break search without looking wrong.
 
 Each step can be switched off, and a report mode shows what *would* change
 without writing anything.
@@ -365,6 +376,17 @@ near-identical output is treated as a failure rather than a success. Alongside
 that it counts run-on words (the signature of old OCR losing its spaces), plus
 Greek, italics and footnote markers — reported for information, since plenty of
 documents legitimately have none.
+
+Those checks judge the document as a whole, and a whole book absorbs one
+half-empty page without a tremor. So `audit.py` asks **page by page** whether
+text was lost: it counts letters and digits against the PDF's own text layer
+(bad OCR still gets the *amount* of text about right), looks for a line the
+model got stuck repeating, and flags a page that has ink but came out empty.
+A page that lost text fails verification and is named:
+
+```bash
+uv run python -m bt.audit output/NAME/raw.md --pdf output/NAME/pages.pdf
+```
 
 ## Known limitations
 

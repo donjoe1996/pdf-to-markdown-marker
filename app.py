@@ -79,6 +79,22 @@ def cached_analysis(path: str, mtime: float, size: int):
     return analyze(path)
 
 
+@st.cache_data(max_entries=8, show_spinner="Checking every page…")
+def cached_findings(md: str, md_mtime: float, pdf: str | None, pdf_mtime: float, fresh_ocr: bool):
+    """Verification, once per version of the Markdown rather than once per rerun.
+
+    The page audit measures *every* page against the PDF, and renders the ones
+    that have no text layer; on a 582-page scan that is far too much to repeat
+    each time a widget is touched. Keyed on both files' mtimes, so new chunks
+    or a re-split invalidate it.
+    """
+    del md_mtime, pdf_mtime  # only present to invalidate the cache
+    from bt.verify import run_all
+
+    text = Path(md).read_text(encoding="utf-8", errors="replace")
+    return run_all(text, pdf_path=pdf, fresh_ocr=fresh_ocr)
+
+
 @st.cache_data(show_spinner=False)
 def render_page(path: str, index: int, dpi: int, mtime: float) -> bytes:
     del mtime
@@ -595,13 +611,14 @@ with tab_result:
         text = result.read_text(encoding="utf-8", errors="replace")
         st.caption(f"`{shown(result, LIBRARY)}` · {len(text):,} characters")
 
-        from bt.verify import run_all
-
         source_for_check = out_dir / "pages.pdf" if split else pdf_path
-        findings = run_all(
-            text,
-            pdf_path=str(source_for_check) if source_for_check.exists() else None,
-            fresh_ocr=ocr,
+        checked = source_for_check.exists()
+        findings = cached_findings(
+            str(result),
+            result.stat().st_mtime,
+            str(source_for_check) if checked else None,
+            source_for_check.stat().st_mtime if checked else 0.0,
+            ocr,
         )
         cols = st.columns(len(findings))
         for col, f in zip(cols, findings, strict=True):  # cols built from len(findings)

@@ -151,7 +151,10 @@ def main(argv: list[str] | None = None) -> int:
     print("\n== Verification ==")
     from bt.verify import run_all
 
-    findings = run_all(cleaned)
+    # Against the PDF that was actually read, so the checks that need no prior
+    # knowledge of the document run: without it only the Being and Time
+    # artefact list was consulted, which says nothing about any other book.
+    findings = run_all(cleaned, pdf_path=ocr_pdf, fresh_ocr=not args.no_ocr)
     for f in findings:
         print(f"  [{'ok  ' if f.ok else 'FAIL'}] {f.name:<13} {f.detail}")
     return 0 if all(f.ok for f in findings) else 1

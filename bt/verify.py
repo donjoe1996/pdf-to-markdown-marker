@@ -155,6 +155,18 @@ def check_footnotes(text: str, required: bool = False) -> Finding:
     return Finding("footnotes", True, f"{n} footnote markers")
 
 
+def check_pages(text: str, pdf_path=None) -> Finding:
+    """Per-page completeness: did any single page lose or repeat text?
+
+    Every other check here judges the document as a whole, and a whole book
+    absorbs one half-empty page without a tremor. See ``bt/audit.py``.
+    """
+    from bt.audit import audit_pages, summarise
+
+    issues = audit_pages(text, pdf_path)
+    return Finding("page audit", not any(i.strong for i in issues), summarise(issues))
+
+
 def run_all(
     text: str,
     pdf_path=None,
@@ -177,6 +189,9 @@ def run_all(
             findings.append(check_not_embedded_layer(text, pdf_path))
         else:
             findings.append(check_text_layer_replaced(text, markers))
+    # Not gated on fresh_ocr: a text-layer extraction loses pages too (a scanned
+    # page inside a born-digital PDF comes out empty).
+    findings.append(check_pages(text, pdf_path))
     findings.append(check_run_ons(text))
     findings.append(check_greek(text, "greek" in expect))
     findings.append(check_italics(text, "italics" in expect))
@@ -189,11 +204,18 @@ def main(argv: list[str] | None = None) -> int:
 
     ap = argparse.ArgumentParser(description="Sanity-check transcribed Markdown.")
     ap.add_argument("md", type=Path, help="Markdown file to check")
+    ap.add_argument(
+        "--pdf",
+        type=Path,
+        default=None,
+        help="the PDF that was OCRed (pages.pdf for a split book). Enables the "
+        "checks that compare the output against the document itself",
+    )
     args = ap.parse_args(argv)
 
     text = args.md.read_text(encoding="utf-8")
     print(f"Checking {args.md} ({len(text):,} chars)\n")
-    findings = run_all(text)
+    findings = run_all(text, pdf_path=args.pdf)
     for f in findings:
         print(f"  [{'ok  ' if f.ok else 'FAIL'}] {f.name:<13} {f.detail}")
 

@@ -28,6 +28,9 @@ from bt.postprocess import PAGE_ANCHOR, PAGE_ANCHOR_FMT
 # Small thresholds so a synthetic book of a few hundred characters behaves like
 # a real one of a few hundred thousand. The ratios are what is being tested.
 SMALL = dict(section_chars=200, max_chars=5000, min_chars=40)
+# The export tests below are about how a book is cut, on a five-page stand-in;
+# min_pages=0 lets it through the book-or-article gate, tested on its own.
+EXPORT = dict(SMALL, min_pages=0)
 
 
 def prose(tag: str, n: int = 3) -> str:
@@ -271,7 +274,7 @@ def book(tmp_path, three_chapters) -> Path:
 
 
 def test_export_writes_one_uniquely_named_file_per_chapter(book):
-    res = chapters.export(book, **SMALL)
+    res = chapters.export(book, **EXPORT)
 
     assert res.out_dir == book.parent / "chapters" / "2006_Dawkins_GodDelusion.english"
     names = sorted(p.name for p in res.out_dir.glob("*.md"))
@@ -285,7 +288,7 @@ def test_export_writes_one_uniquely_named_file_per_chapter(book):
 
 
 def test_contents_links_every_chapter_with_its_pages(book):
-    res = chapters.export(book, **SMALL)
+    res = chapters.export(book, **EXPORT)
     toc = (res.out_dir / "GodDelusion 00 Contents.md").read_text(encoding="utf-8")
 
     links = re.findall(r"\[\[([^\]]+)\]\]", toc)
@@ -296,19 +299,19 @@ def test_contents_links_every_chapter_with_its_pages(book):
 
 
 def test_contents_can_be_left_out(book):
-    res = chapters.export(book, contents=False, **SMALL)
+    res = chapters.export(book, contents=False, **EXPORT)
     assert not list(res.out_dir.glob("* 00 Contents.md"))
 
 
 def test_a_rerun_replaces_its_own_files_and_nothing_else(book):
     """Renamed chapters must not leave their old files to be indexed twice."""
-    res = chapters.export(book, **SMALL)
+    res = chapters.export(book, **EXPORT)
     stale = res.out_dir / "GodDelusion 07 Old name.md"
     stale.write_text("old", encoding="utf-8")
     mine = res.out_dir / "My own note.md"
     mine.write_text("keep", encoding="utf-8")
 
-    chapters.export(book, **SMALL)
+    chapters.export(book, **EXPORT)
 
     assert not stale.exists()
     assert mine.read_text(encoding="utf-8") == "keep"
@@ -323,7 +326,7 @@ def test_figures_travel_with_the_folder(book):
     gone = "![](2006_Dawkins_GodDelusion_images/missing.jpeg)"
     book.write_text(book.read_text(encoding="utf-8") + f"\n\n{link}\n\n{gone}", encoding="utf-8")
 
-    res = chapters.export(book, **SMALL)
+    res = chapters.export(book, **EXPORT)
 
     assert (res.out_dir / "2006_Dawkins_GodDelusion_images"
             / "0000-0009_page_3_Figure_2.jpeg").read_bytes() == b"jpeg"
@@ -341,7 +344,7 @@ def test_a_percent_encoded_figure_link_is_found_on_disk(tmp_path):
     md.write_text(doc([f"# One\n\n{prose('x', 4)}\n\n![](A%20Book_images/f.png)"]),
                   encoding="utf-8")
 
-    res = chapters.export(md, **SMALL)
+    res = chapters.export(md, **EXPORT)
 
     assert (res.out_dir / "A Book_images" / "f.png").exists()
     assert res.images_missing == []
@@ -351,16 +354,68 @@ def test_a_link_cannot_copy_from_outside_the_book(tmp_path, book):
     (tmp_path / "secret.png").write_bytes(b"x")
     book.write_text(book.read_text(encoding="utf-8") + "\n\n![](../../secret.png)",
                     encoding="utf-8")
-    res = chapters.export(book, **SMALL)
+    res = chapters.export(book, **EXPORT)
     assert res.images_copied == 0
     assert not list(res.out_dir.rglob("secret.png"))
 
 
 def test_main_prints_where_the_files_went(book, capsys):
     assert chapters.main([str(book), "--prefix", "GD", "--section-chars", "200",
-                          "--min-chars", "40"]) == 0
+                          "--min-chars", "40", "--min-pages", "0"]) == 0
     out = capsys.readouterr().out
     assert "GD 01 One beginning.md" in out
+
+
+# --------------------------------------------------------------------------
+# books, not articles
+# --------------------------------------------------------------------------
+def long_book(pages: int = chapters.BOOK_MIN_PAGES + 10) -> str:
+    """A book-length document: a chapter every ten pages."""
+    return doc([
+        (f"# Chapter {k // 10 + 1}\n\n" if k % 10 == 0 else "") + prose(f"pg{k}", 2)
+        for k in range(pages)
+    ])
+
+
+def test_an_article_is_left_as_one_note(tmp_path):
+    """A journal article is already note-sized: split, one argument would be
+    scattered across files that each read as a fragment, for no gain."""
+    md = tmp_path / "2021_Smith_Paper" / "2021_Smith_Paper.english.md"
+    md.parent.mkdir()
+    md.write_text(
+        doc([f"# Section {k}\n\n{prose(f's{k}', 4)}" for k in range(12)]), encoding="utf-8"
+    )
+
+    res = chapters.export(md, **SMALL)
+
+    assert res.skipped and res.pages == 12
+    assert res.files == []
+    assert not res.out_dir.exists()
+    assert "one note" in res.render()
+
+
+def test_a_book_is_split(tmp_path):
+    md = tmp_path / "2006_Dawkins_GodDelusion" / "2006_Dawkins_GodDelusion.md"
+    md.parent.mkdir()
+    md.write_text(long_book(), encoding="utf-8")
+
+    res = chapters.export(md, **SMALL)
+
+    assert not res.skipped and res.pages == chapters.BOOK_MIN_PAGES + 10
+    assert len(res.files) == 1 + 7  # contents + a chapter per ten pages
+
+
+def test_a_document_without_anchors_is_measured_by_length():
+    """No page anchors (a hand-made file): pages are estimated from characters."""
+    short = "# A\n\n" + "x" * 1000
+    long = "# A\n\n" + "x" * (chapters.CHARS_PER_PAGE * (chapters.BOOK_MIN_PAGES + 1))
+    assert chapters.page_count(short) == 1
+    assert chapters.page_count(long) > chapters.BOOK_MIN_PAGES
+
+
+def test_a_page_counted_twice_is_one_page():
+    """A preamble and a mid-page chapter both repeat an anchor; pages are distinct."""
+    assert chapters.page_count(doc(["a", "b"]) + "\n\n<!-- page 1 -->\n\nc") == 2
 
 
 # --------------------------------------------------------------------------
@@ -391,7 +446,8 @@ def test_translate_exports_chapters_only_when_the_book_is_complete(
 
     monkeypatch.setattr(translate, "OpenAICompatTranslator", backend)
     src = book.with_name("2006_Dawkins_GodDelusion.md")
-    book.rename(src)
+    src.write_text(long_book(), encoding="utf-8")
+    book.unlink()
     out = src.with_name("2006_Dawkins_GodDelusion.english.md")
 
     translate.main([str(src), str(out), "--provider", "local"])

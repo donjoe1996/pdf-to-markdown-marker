@@ -588,6 +588,14 @@ rest is; split by chapter it can supply all 6. Passage size does not change --
 Ask cuts ~1,200-character passages under each heading and carries the heading
 path -- so sections as files would only multiply files.
 
+**Books only, decided by length.** A journal article is already note-sized;
+split, one argument is scattered over files that each read as a fragment.
+Articles run ~5-40 pages and books 100+, so a document under `BOOK_MIN_PAGES`
+(60, counted as *distinct* page anchors, or estimated from characters when
+there are none) is skipped: nothing is written, `ExportResult.skipped` says so,
+and the GUI shows "an article -- use NAME.md as it is" instead of a split
+button. `--min-pages 0` splits anything.
+
 **The level is chosen per book** (`choose_level`): the *deepest* heading level
 whose median piece is still above `SECTION_CHARS` (~10 pages). Taking `#` would
 give one file for a book whose only `#` is its title, and parts rather than

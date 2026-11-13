@@ -25,6 +25,11 @@ every citation at the wrong page.
 anchors. A footnote definition follows its reference into the other file when
 a cut falls between them, because a footnote resolves only within its note.
 
+**Books only.** A journal article is already note-sized; split, one argument
+is scattered over files that each read as a fragment. Length is the signal --
+articles run ~5-40 pages, books 100 or more -- so a document under
+``BOOK_MIN_PAGES`` is left as the one note it is and nothing is written.
+
 **Names are unique across books**: ``<Prefix> NN <Title>.md``. Links resolve
 by file name across the whole vault, so ``Chapter 1.md`` in two books would
 collide.
@@ -57,6 +62,11 @@ MAX_CHARS = 200_000
 # Less text than this is a title page ("Part Two") or a stray label: it joins
 # the chapter after it rather than becoming a note that can only answer its name.
 MIN_CHARS = 500
+# Shorter than this is an article, not a book, and is left as one note. Journal
+# articles run ~5-40 pages and books 100+; 60 sits in the gap between them.
+BOOK_MIN_PAGES = 60
+# Body text per page, for a document without page anchors to count.
+CHARS_PER_PAGE = 2_000
 # Headings deeper than this are never chapters.
 MAX_LEVEL = 3
 
@@ -324,6 +334,16 @@ def split_chapters(
 # --------------------------------------------------------------------------
 # the export
 # --------------------------------------------------------------------------
+def page_count(text: str) -> int:
+    """Pages in the document: distinct page anchors, or an estimate from length.
+
+    Distinct, because an anchor can repeat (a preamble shares page 0; a chapter
+    opening mid-page re-emits its page).
+    """
+    numbers = {int(m.group(1)) for m in PAGE_ANCHOR.finditer(text)}
+    return len(numbers) if numbers else max(1, math.ceil(len(text) / CHARS_PER_PAGE))
+
+
 def book_prefix(name: str) -> str:
     """``2006_Dawkins_GodDelusion`` -> ``GodDelusion``: the book's short name.
 
@@ -360,6 +380,9 @@ def file_name(prefix: str, number: int, title: str, width: int) -> str:
 class ExportResult:
     out_dir: Path
     level: int | None
+    src: Path | None = None
+    pages: int = 0
+    skipped: bool = False  # an article: left as one note, nothing written
     files: list[Path] = field(default_factory=list)
     footnotes_moved: int = 0
     images_copied: int = 0
@@ -367,6 +390,12 @@ class ExportResult:
     removed: list[str] = field(default_factory=list)
 
     def render(self) -> str:
+        if self.skipped:
+            name = self.src.name if self.src else "the Markdown"
+            return (
+                f"{self.pages} pages: an article, not a book -- kept as one note, "
+                f"no chapters written. Use {name} as it is."
+            )
         lines = [
             f"{len(self.files)} files in {self.out_dir}",
             f"  chapter level: {'#' * self.level if self.level else 'none (no heading level splits it)'}",
@@ -422,16 +451,25 @@ def export(
     section_chars: int = SECTION_CHARS,
     max_chars: int = MAX_CHARS,
     min_chars: int = MIN_CHARS,
+    min_pages: int = BOOK_MIN_PAGES,
 ) -> ExportResult:
-    """Write ``src_md`` as one file per chapter into ``out_dir``."""
+    """Write ``src_md`` as one file per chapter into ``out_dir``.
+
+    A document under ``min_pages`` is an article: nothing is written and the
+    result says so (``skipped``).
+    """
     src_md = Path(src_md)
     out_dir = Path(out_dir) if out_dir else default_out_dir(src_md)
     prefix = (prefix or book_prefix(book_name(src_md))).strip()
     text = src_md.read_text(encoding="utf-8")
+    pages = page_count(text)
+    if pages < min_pages:
+        return ExportResult(out_dir=out_dir, level=None, src=src_md, pages=pages, skipped=True)
 
     parts, level, moved = _split(text, level, section_chars, max_chars, min_chars)
-
-    res = ExportResult(out_dir=out_dir, level=level, footnotes_moved=moved)
+    res = ExportResult(
+        out_dir=out_dir, level=level, src=src_md, pages=pages, footnotes_moved=moved
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     width = max(2, len(str(len(parts))))
     entries = []
@@ -484,6 +522,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="a level whose median piece is smaller than this is sections")
     ap.add_argument("--max-chars", type=int, default=MAX_CHARS,
                     help="cut a chapter larger than this at page anchors")
+    ap.add_argument("--min-pages", type=int, default=BOOK_MIN_PAGES,
+                    help="shorter documents are articles and stay one note; 0 splits anything")
     ap.add_argument("--min-chars", type=int, default=MIN_CHARS,
                     help="a smaller piece (a part's title page) joins the next chapter")
     args = ap.parse_args(argv)
@@ -494,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
     res = export(
         args.src, out_dir=args.out_dir, prefix=args.prefix, level=args.level,
         contents=not args.no_contents, section_chars=args.section_chars,
-        max_chars=args.max_chars, min_chars=args.min_chars,
+        max_chars=args.max_chars, min_chars=args.min_chars, min_pages=args.min_pages,
     )
     print(res.render())
     return 0

@@ -445,7 +445,20 @@ def test_the_result_can_be_split_into_chapters_for_a_vault(finished_book):
     Translation exports chapters itself when it completes; an untranslated book
     has no job to do it, so the Result tab offers the same export by hand.
     """
+    from bt import chapters
+
     pdf, out = finished_book
+    md = out / "book.md"
+    pages = chapters.BOOK_MIN_PAGES + 5
+    md.write_text(
+        "\n\n".join(
+            f"<!-- page {k} -->\n\n" + ("# Chapter\n\n" if k % 20 == 0 else "")
+            + f"Text of page {k}. " * 10
+            for k in range(pages)
+        )
+        + "\n\n![](images/0000-0009_page_0_Figure_1.jpeg)\n",
+        encoding="utf-8",
+    )
     at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
     result = _tab(at, "Result")
     assert any("Chapters for a RAG vault" in e.label for e in result.expander)
@@ -454,12 +467,21 @@ def test_the_result_can_be_split_into_chapters_for_a_vault(finished_book):
 
     assert not at.exception, [str(e.value) for e in at.exception]
     folder = out / "chapters" / "book"
-    assert sorted(p.name for p in folder.glob("*.md")) == [
-        "book 00 Contents.md",
-        "book 01 Front matter.md",
-    ]
+    assert len(list(folder.glob("book 0[1-9] *.md"))) == 4
     # the figure the Markdown links travels with the folder
     assert (folder / "images" / "0000-0009_page_0_Figure_1.jpeg").exists()
+
+
+def test_an_article_is_not_offered_a_chapter_split(finished_book):
+    """A journal article stays one note: no button, and the page says why."""
+    pdf, out = finished_book  # two pages
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    result = _tab(at, "Result")
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert not any("chapters" in b.label.lower() for b in result.button)
+    assert any("article" in c.value for c in result.caption)
+    assert not (out / "chapters").exists()
 
 
 def test_a_new_pdf_in_the_library_does_not_change_the_open_document(make_pdf, tmp_path):

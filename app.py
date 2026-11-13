@@ -240,6 +240,16 @@ def chapters_section(md: Path, key: str) -> None:
     """
     from bt import chapters
 
+    pages = chapters.page_count(md.read_text(encoding="utf-8", errors="replace"))
+    if pages < chapters.BOOK_MIN_PAGES:
+        # A journal article is already note-sized; split, one argument would be
+        # scattered over files that each read as a fragment.
+        st.caption(
+            f":material/article: {pages} pages — an article, not a book: it goes "
+            f"into the vault as one note. Use `{md.name}` as it is."
+        )
+        return
+
     folder = chapters.default_out_dir(md)
     notes = sorted(folder.glob("*.md")) if folder.is_dir() else []
     with st.expander(f"Chapters for a RAG vault ({len(notes)} notes)"):

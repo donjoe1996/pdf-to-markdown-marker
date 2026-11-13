@@ -313,6 +313,25 @@ def chunk_path(chunk_dir: Path, first: int, last: int) -> Path:
     return chunk_dir / f"{first:04d}-{last:04d}.md"
 
 
+# marker names a link target "page-<page>-<n>", counting n from zero in each
+# conversion -- so "page-19-0" is a different place in every chunk that links
+# to page 19.
+ANCHOR_ID = re.compile(r"""(\(#|id=["'])(page-\d+-\d+)""")
+
+
+def namespace_anchors(text: str, first: int) -> str:
+    """Prefix a chunk's link targets and the links to them with its first page.
+
+    Joined as written, the first ten pages' citation of reference 1 and the
+    next ten pages' citation of reference 21 were both "#page-19-0", and every
+    link from the first chunk opened whichever reference the second had given
+    that id. Applied when chunks are joined, not when they are written, so
+    books transcribed before this are repaired by re-joining them; a prefixed
+    id no longer matches, so applying it twice changes nothing.
+    """
+    return ANCHOR_ID.sub(lambda m: f"{m.group(1)}c{first:04d}-{m.group(2)}", text)
+
+
 def concatenate(
     chunk_dir: Path, out_md: Path, bounds: list[tuple[int, int]] | None = None
 ) -> Path:
@@ -340,7 +359,11 @@ def concatenate(
         chunks = [p for _, p in sorted(named)]
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(
-        "\n\n".join(c.read_text(encoding="utf-8").strip() for c in chunks) + "\n",
+        "\n\n".join(
+            namespace_anchors(c.read_text(encoding="utf-8").strip(), int(c.stem[:4]))
+            for c in chunks
+        )
+        + "\n",
         encoding="utf-8",
     )
     print(f"Concatenated {len(chunks)} chunks -> {out_md}")

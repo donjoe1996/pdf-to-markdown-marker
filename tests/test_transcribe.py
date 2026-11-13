@@ -17,6 +17,7 @@ from bt.transcribe import (
     build_config,
     chunk_path,
     concatenate,
+    namespace_anchors,
     rewrite_image_links,
     save_images,
 )
@@ -67,6 +68,35 @@ def test_concatenate_fallback_ignores_unrelated_markdown(tmp_path, make_chunks):
     out = tmp_path / "raw.md"
     concatenate(tmp_path / "chunks", out, None)
     assert "personal notes" not in out.read_text()
+
+
+def test_concatenate_namespaces_link_targets_by_chunk(tmp_path):
+    """REGRESSION: citation links opened the wrong reference.
+
+    marker numbers link targets from zero in each conversion, so "page-19-0"
+    was reference 1 for the first chunk and reference 21 for the second. Only
+    the second chunk holds page 19, so its meaning won and every citation in
+    the first ten pages pointed at some other entry.
+    """
+    chunks = tmp_path / "chunks"
+    chunks.mkdir()
+    chunk_path(chunks, 0, 9).write_text("carbon[1](#page-19-0)", encoding="utf-8")
+    chunk_path(chunks, 10, 19).write_text(
+        'Other[21](#page-19-0)\n\n<span id="page-19-0"></span>21. Bourgoin.', encoding="utf-8"
+    )
+    out = tmp_path / "raw.md"
+    concatenate(chunks, out, [(0, 9), (10, 19)])
+
+    text = out.read_text()
+    assert "carbon[1](#c0000-page-19-0)" in text
+    assert "Other[21](#c0010-page-19-0)" in text
+    assert text.count('id="c0010-page-19-0"') == 1
+    assert chunk_path(chunks, 0, 9).read_text() == "carbon[1](#page-19-0)", "chunks stay as written"
+
+
+def test_namespacing_link_targets_twice_changes_nothing():
+    once = namespace_anchors('x[1](#page-3-0) <span id="page-3-0"></span>', 0)
+    assert namespace_anchors(once, 0) == once
 
 
 # --------------------------------------------------------------------------

@@ -63,7 +63,7 @@ edit is made.
 
 ```bash
 uv run ruff check .          # layer 0: undefined names, unused imports (~1s)
-uv run pytest                # fast suite, ~2s, 220 tests
+uv run pytest                # fast suite, ~2s, 240 tests
 uv run pytest -m slow        # Streamlit smoke tests (boot the app; ~1 min locally)
 uv run pytest -m ""          # everything, as CI runs it
 uv run pytest --golden-update   # rewrite golden files -- review the diff
@@ -313,6 +313,46 @@ surya retry a failed page as a whole page before falling back to blocks.
 **That setting is taken from surya's source and has not been measured on this
 machine** -- it only acts on pages whose first pass failed, but if such pages
 turn out slow, `SURYA_FULLPAGE_REGEN=0` restores the default.
+
+**A superscript is a footnote only where its page defines the note.** Every
+`<sup>n</sup>` used to become `[^pN-n]`. In a journal article that turned the
+indices of an equation into `[^p9-i]` -- references to nothing -- and an
+affiliation block (several notes on one line) into a single definition that
+swallowed the rest. `namespace_footnotes()` now splits a run-on line of notes
+into one definition each and namespaces only markers the same page defines;
+anything else stays the `<sup>` it was. Consequence for endnote books: a
+reference whose note is at the back of the book stays `<sup>366</sup>` rather
+than `[^p0-366]`. Neither resolves, and the superscript at least renders.
+
+**marker's link targets are numbered per conversion, so they are namespaced per
+chunk.** A target is `page-<page>-<n>` with n counted from zero in each chunk:
+`#page-19-0` was reference 1 for pages 0-9 and reference 21 for pages 10-19, and
+only the chunk holding page 19 writes the `<span id>`, so every citation in the
+first chunk opened some other reference. `transcribe.namespace_anchors()`
+prefixes both ends with the chunk's first page **at join time**, so chunk files
+stay as written and an already-transcribed book is repaired by re-joining it.
+What is then left dangling (a target in another chunk is never written at all)
+`postprocess.unlink_dangling()` replaces with its text -- as a superscript where
+the number was attached to a word, or "by 2030" + "5" reads "by 20305".
+
+**A citation link steals the neighbouring glyphs.** marker's link text comes
+from the PDF's link rectangle: `biodiversit[y2](#..)`, `[\)15](#..)`,
+`[27.](#..)`. `tidy_links()` hands the letter and the punctuation back; it only
+touches an internal link whose text is otherwise a number.
+
+**Headings follow the PDF's bookmarks when it has any.** marker guesses a level
+from type size per page (siblings came out `#`, `####`, `##`) and a run-in
+sub-heading (`**Input data.** The primary...`) is not a heading at all -- a
+paper with 42 bookmarks produced 16 headings. `postprocess.Outline` sets levels
+from `read_outline(pdf)`, promotes a bold run-in whose text *equals* a bookmark
+within a page of it (equality, so `**Fig. 1**` never matches the "Fig. 1 ..."
+caption bookmark), and splits a badge fused onto the title. A heading the
+outline does not know becomes a sibling of the last one it did. No outline (most
+scans) means no change. `bt.postprocess` takes `--pdf` for this.
+
+**The page bridge skips a trailing label.** A sidebar tag marker placed last on
+the page (`**Data Descriptor**`) has no sentence end, so it passed for the cut
+paragraph and the continuation was glued to it.
 
 **Footnote ids must be namespaced per page.** Footnote "1" recurs on nearly every
 page; un-namespaced ids would collide hundreds of times in one document.

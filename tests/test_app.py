@@ -437,3 +437,26 @@ def test_a_provider_that_will_not_list_still_leaves_a_usable_model_field(
     field = _model_field(at)
     assert field.value  # the preset, not an empty picker
     assert field.accept_new_options  # and an id can still be typed
+
+
+def test_the_result_can_be_split_into_chapters_for_a_vault(finished_book):
+    """The chapter export is reachable from the GUI, and its button works.
+
+    Translation exports chapters itself when it completes; an untranslated book
+    has no job to do it, so the Result tab offers the same export by hand.
+    """
+    pdf, out = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    result = _tab(at, "Result")
+    assert any("Chapters for a RAG vault" in e.label for e in result.expander)
+
+    next(b for b in result.button if b.label == "Split into chapters").click().run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    folder = out / "chapters" / "book"
+    assert sorted(p.name for p in folder.glob("*.md")) == [
+        "book 00 Contents.md",
+        "book 01 Front matter.md",
+    ]
+    # the figure the Markdown links travels with the folder
+    assert (folder / "images" / "0000-0009_page_0_Figure_1.jpeg").exists()

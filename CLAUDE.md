@@ -34,6 +34,8 @@ uv run bt-transcribe --pdf FILE.pdf --images            # keep figures/charts to
                                                         # -> output/NAME/NAME_images/
 uv run python -m bt.translate output/NAME/NAME.md --target English   # optional stage 4
 uv run python -m bt.translate FILE.md --provider local              # offline, no key
+uv run python -m bt.chapters output/NAME/NAME.english.md   # one note per chapter, for a RAG vault
+                                                           # -> output/NAME/chapters/NAME.english/
 ```
 
 **`--pdf` is required** — there is no default document any more.
@@ -63,7 +65,7 @@ edit is made.
 
 ```bash
 uv run ruff check .          # layer 0: undefined names, unused imports (~1s)
-uv run pytest                # fast suite, ~2s, 240 tests
+uv run pytest                # fast suite, ~2s, 273 tests
 uv run pytest -m slow        # Streamlit smoke tests (boot the app; ~1 min locally)
 uv run pytest -m ""          # everything, as CI runs it
 uv run pytest --golden-update   # rewrite golden files -- review the diff
@@ -140,6 +142,7 @@ at.selectbox[0].set_value("meditationsofmar00marc.pdf").run()
 | 2b | `transcribe.py` | Chunked, resumable OCR via marker |
 | 3 | `postprocess.py` | Clean characters, strip heads, namespace footnotes, dehyphenate, reflow, bridge page breaks |
 | 4 | `translate.py` | **Optional.** Translate the finished Markdown via a free LLM endpoint |
+| 5 | `chapters.py` | **Optional.** One file per chapter, for a RAG vault; run by `translate` on completion |
 | — | `verify.py` | Quality checks on the finished Markdown |
 | — | `audit.py` | Per-page completeness: which pages lost, repeated or never got text |
 
@@ -562,6 +565,47 @@ fails identically 582 times.
 `finish_reason == "length"` is an error, not a result. Free models have small
 output caps, and a page truncated mid-sentence reads exactly like a page that
 ended there — this is the likeliest silent failure of the stage.
+
+## Chapters for a RAG vault (`bt/chapters.py`) — optional stage 5
+
+`uv run python -m bt.chapters output/NAME/NAME.english.md`, the **Chapters for a
+RAG vault** expander under Result and Translate, and automatically at the end of
+a *completed* `bt.translate` run (`--no-chapters` to skip). Writes
+`output/NAME/chapters/<md stem>/`, the folder to copy into the vault, as
+`<Prefix> 00 Contents.md` + `<Prefix> NN <Chapter title>.md`.
+
+**Why chapters.** The vault's Ask builds an answer from the 6 best passages,
+at most 3 per note. A whole book as one note can supply 3, however relevant the
+rest is; split by chapter it can supply all 6. Passage size does not change --
+Ask cuts ~1,200-character passages under each heading and carries the heading
+path -- so sections as files would only multiply files.
+
+**The level is chosen per book** (`choose_level`): the *deepest* heading level
+whose median piece is still above `SECTION_CHARS` (~10 pages). Taking `#` would
+give one file for a book whose only `#` is its title, and parts rather than
+chapters for a book in parts. A piece under `MIN_CHARS` (a part's title page)
+joins the chapter after it; a piece over `MAX_CHARS` (or a book with no
+headings) is cut at page anchors, never mid-page. Headings are not re-levelled.
+
+**Page anchors are never renumbered.** A chapter opening mid-page starts with
+that page's anchor again, and an anchor directly above a chapter heading goes
+with the heading -- otherwise the first passage of a file has no page, or the
+previous file's. **A footnote definition follows its reference** across a cut,
+since a footnote resolves only within its note.
+
+**File names are unique across books** -- links resolve by file name across
+the vault. The prefix is the last `_` part of the book folder
+(`2006_Dawkins_GodDelusion` → `GodDelusion`); `--prefix` overrides it. Titles
+lose `/ \ : * ? " < > | # ^ [ ]` and markup. A re-run deletes its own stale
+`<Prefix> NN *.md` files (a renamed chapter would otherwise be indexed twice)
+and nothing else. Linked figures are copied into the folder, links unchanged.
+
+**Only a finished translation is split.** A part-done book split into chapters
+looks complete; its last chapter simply ends early.
+
+Trade-off: the cap is per note, so a split book can fill all 6 slots in an
+"All notes" query and push the user's own notes out; Ask's Sources selector is
+the remedy, not this code.
 
 ## Running on a GPU (Colab)
 

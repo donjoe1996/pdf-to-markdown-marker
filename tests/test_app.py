@@ -460,3 +460,49 @@ def test_the_result_can_be_split_into_chapters_for_a_vault(finished_book):
     ]
     # the figure the Markdown links travels with the folder
     assert (folder / "images" / "0000-0009_page_0_Figure_1.jpeg").exists()
+
+
+def test_a_new_pdf_in_the_library_does_not_change_the_open_document(make_pdf, tmp_path):
+    """Uploading a book switched the page to a different one.
+
+    The picker had no key, so Streamlit identified it by its label and options.
+    An upload is saved into the library, the next run discovers one more PDF,
+    the options differ -- and Streamlit treats that as a new widget and resets it
+    to index 0: whichever book sorts first opened in place of the one in use.
+    """
+    make_pdf("a.pdf", pages=1)
+    b = make_pdf("b.pdf", pages=1)
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), b)
+
+    (tmp_path / "uploads").mkdir()
+    make_pdf("uploads/c.pdf", pages=1)
+    at.run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert at.sidebar.selectbox[0].value == "b.pdf"
+    assert at.header[0].value == "b.pdf"
+
+
+def test_an_uploaded_book_opens_and_stays_open(make_pdf, tmp_path):
+    """After an upload the page shows the uploaded book -- and still does after
+    the next click, which is when the reset used to happen."""
+    import pymupdf
+
+    make_pdf("a.pdf", pages=1)
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "An uploaded book.")
+    content = doc.tobytes()
+    doc.close()
+
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    at.run()
+    at.sidebar.selectbox[0].set_value("Upload a file…").run()
+    at.sidebar.file_uploader[0].upload("new.pdf", content, "application/pdf").run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert (tmp_path / "uploads" / "new.pdf").exists()
+    assert at.sidebar.selectbox[0].value == "uploads/new.pdf"
+    assert at.header[0].value == "new.pdf"
+
+    at.run()  # any later interaction reruns the whole script
+    assert at.sidebar.selectbox[0].value == "uploads/new.pdf"

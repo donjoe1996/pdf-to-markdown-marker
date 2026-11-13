@@ -391,6 +391,14 @@ and no `base`, so it follows the browser. Colour is reserved for state —
 running, stopped, failed — and structure comes from borders and spacing:
 this page is watched for hours while a book transcribes.
 
+**The document picker is keyed, and an upload opens itself.** Unkeyed, Streamlit
+identifies a selectbox by its label and options. An upload is saved into the
+library, so the next run had one more option, Streamlit saw a new widget, and it
+reset to index 0: the page jumped to whichever book sorts first. The open
+document now lives in `st.session_state["document"]`, and an upload hands its
+own label over through `open_after_upload` + `st.rerun()`, because a widget's
+value cannot be set after the widget is drawn in the same run.
+
 **Verification is cached per version of the Markdown** (`cached_findings`,
 keyed on the mtimes of the Markdown and the PDF). The page audit reads every
 page of the PDF, and Streamlit re-executes the script on every interaction;

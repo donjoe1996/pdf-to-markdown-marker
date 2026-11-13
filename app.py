@@ -321,20 +321,40 @@ pdfs = bt_queue.discover()
 # Label by path relative to the library, not bare filename: uploads/ files live
 # in a subfolder, and resolving a bare name against the root would miss them.
 by_label = {shown(p, LIBRARY): p for p in pdfs}
-labels = list(by_label) + ["Upload a file…"]
+UPLOAD = "Upload a file…"
+labels = list(by_label) + [UPLOAD]
+
+# The open document lives in session state under a key, not in the widget's
+# own default. Unkeyed, Streamlit identified the picker by its label and
+# options, so a library that grew by one PDF -- which every upload does, since
+# it is saved into the library -- made a "new" widget reset to index 0, and the
+# page switched to whichever book sorts first.
+DOC_KEY = "document"
+# An upload asks for its own book on the next run: a widget's value can only be
+# set before the widget is drawn, and the upload is handled after it.
+requested = st.session_state.pop("open_after_upload", None)
+if requested in labels:
+    st.session_state[DOC_KEY] = requested
+elif st.session_state.get(DOC_KEY) not in labels:
+    # First run, or the open book was deleted or moved.
+    st.session_state[DOC_KEY] = labels[0] if pdfs else UPLOAD
 # Kept first among the sidebar's selectboxes on purpose: the smoke tests address
 # it as `at.sidebar.selectbox[0]`, because the tabs below add pickers of their own.
-choice = st.sidebar.selectbox("Document", labels, index=0 if pdfs else len(labels) - 1)
+choice = st.sidebar.selectbox("Document", labels, key=DOC_KEY)
 
 pdf_path: Path | None = None
-if choice == "Upload a file…":
+if choice == UPLOAD:
     up = st.sidebar.file_uploader("Choose a PDF", type="pdf")
     if up is not None:
         dest = LIBRARY / "uploads" / up.name
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists() or dest.stat().st_size != up.size:
             dest.write_bytes(up.getbuffer())
-        pdf_path = dest
+        # Open what was just uploaded. Left on "Upload a file…", the book was
+        # only on screen until the next click; the picker is the one place
+        # that says which document is open.
+        st.session_state["open_after_upload"] = shown(dest, LIBRARY)
+        st.rerun()
 else:
     pdf_path = by_label.get(choice)
 

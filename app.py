@@ -231,6 +231,42 @@ def progress_panel(folder: Path, pages_per_chunk: int, fallback_chunks: int) -> 
             st.code("\n".join(live.last_lines), language="text")
 
 
+def chapters_section(md: Path, key: str) -> None:
+    """One file per chapter, for a RAG vault (``bt.chapters``).
+
+    A retriever that caps passages per note can use only a few of a whole-book
+    note; per chapter, the same book can fill an answer. Splitting is text-only
+    and takes well under a second, so it runs here rather than as a job.
+    """
+    from bt import chapters
+
+    pages = chapters.page_count(md.read_text(encoding="utf-8", errors="replace"))
+    if pages < chapters.BOOK_MIN_PAGES:
+        # A journal article is already note-sized; split, one argument would be
+        # scattered over files that each read as a fragment.
+        st.caption(
+            f":material/article: {pages} pages — an article, not a book: it goes "
+            f"into the vault as one note. Use `{md.name}` as it is."
+        )
+        return
+
+    folder = chapters.default_out_dir(md)
+    notes = sorted(folder.glob("*.md")) if folder.is_dir() else []
+    with st.expander(f"Chapters for a RAG vault ({len(notes)} notes)"):
+        st.caption(
+            f"`{folder.relative_to(md.parent.parent)}/` — one note per chapter, "
+            "page anchors kept. Copy the folder into the vault."
+        )
+        if notes:
+            st.text("\n".join(p.name for p in notes[:40]))
+        if st.button(
+            "Re-split into chapters" if notes else "Split into chapters",
+            icon=":material/call_split:",
+            key=f"chapters-{key}",
+        ):
+            st.code(chapters.export(md).render(), language="text")
+
+
 @st.fragment(run_every=5)
 def translation_panel(folder: Path, translated_md: Path) -> None:
     """Translation progress and result, re-read from disk like the OCR panel.
@@ -275,6 +311,8 @@ def translation_panel(folder: Path, translated_md: Path) -> None:
         )
         with st.expander("Preview translation"):
             st.text(body[:4000] + ("\n\n… truncated" if len(body) > 4000 else ""))
+        if not live.running:
+            chapters_section(translated_md, "translation")
 
 
 # --------------------------------------------------------------------------
@@ -293,20 +331,40 @@ pdfs = bt_queue.discover()
 # Label by path relative to the library, not bare filename: uploads/ files live
 # in a subfolder, and resolving a bare name against the root would miss them.
 by_label = {shown(p, LIBRARY): p for p in pdfs}
-labels = list(by_label) + ["Upload a file…"]
+UPLOAD = "Upload a file…"
+labels = list(by_label) + [UPLOAD]
+
+# The open document lives in session state under a key, not in the widget's
+# own default. Unkeyed, Streamlit identified the picker by its label and
+# options, so a library that grew by one PDF -- which every upload does, since
+# it is saved into the library -- made a "new" widget reset to index 0, and the
+# page switched to whichever book sorts first.
+DOC_KEY = "document"
+# An upload asks for its own book on the next run: a widget's value can only be
+# set before the widget is drawn, and the upload is handled after it.
+requested = st.session_state.pop("open_after_upload", None)
+if requested in labels:
+    st.session_state[DOC_KEY] = requested
+elif st.session_state.get(DOC_KEY) not in labels:
+    # First run, or the open book was deleted or moved.
+    st.session_state[DOC_KEY] = labels[0] if pdfs else UPLOAD
 # Kept first among the sidebar's selectboxes on purpose: the smoke tests address
 # it as `at.sidebar.selectbox[0]`, because the tabs below add pickers of their own.
-choice = st.sidebar.selectbox("Document", labels, index=0 if pdfs else len(labels) - 1)
+choice = st.sidebar.selectbox("Document", labels, key=DOC_KEY)
 
 pdf_path: Path | None = None
-if choice == "Upload a file…":
+if choice == UPLOAD:
     up = st.sidebar.file_uploader("Choose a PDF", type="pdf")
     if up is not None:
         dest = LIBRARY / "uploads" / up.name
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists() or dest.stat().st_size != up.size:
             dest.write_bytes(up.getbuffer())
-        pdf_path = dest
+        # Open what was just uploaded. Left on "Upload a file…", the book was
+        # only on screen until the next click; the picker is the one place
+        # that says which document is open.
+        st.session_state["open_after_upload"] = shown(dest, LIBRARY)
+        st.rerun()
 else:
     pdf_path = by_label.get(choice)
 
@@ -675,6 +733,8 @@ with tab_result:
 
         with st.expander("Preview text"):
             st.text(text[:4000] + ("\n\n… truncated" if len(text) > 4000 else ""))
+        if result == final_md:
+            chapters_section(final_md, "result")
 
 # ==========================================================================
 # Translate -- optional stage 4, and a separate job from the pipeline

@@ -437,3 +437,94 @@ def test_a_provider_that_will_not_list_still_leaves_a_usable_model_field(
     field = _model_field(at)
     assert field.value  # the preset, not an empty picker
     assert field.accept_new_options  # and an id can still be typed
+
+
+def test_the_result_can_be_split_into_chapters_for_a_vault(finished_book):
+    """The chapter export is reachable from the GUI, and its button works.
+
+    Translation exports chapters itself when it completes; an untranslated book
+    has no job to do it, so the Result tab offers the same export by hand.
+    """
+    from bt import chapters
+
+    pdf, out = finished_book
+    md = out / "book.md"
+    pages = chapters.BOOK_MIN_PAGES + 5
+    md.write_text(
+        "\n\n".join(
+            f"<!-- page {k} -->\n\n" + ("# Chapter\n\n" if k % 20 == 0 else "")
+            + f"Text of page {k}. " * 10
+            for k in range(pages)
+        )
+        + "\n\n![](images/0000-0009_page_0_Figure_1.jpeg)\n",
+        encoding="utf-8",
+    )
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    result = _tab(at, "Result")
+    assert any("Chapters for a RAG vault" in e.label for e in result.expander)
+
+    next(b for b in result.button if b.label == "Split into chapters").click().run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    folder = out / "chapters" / "book"
+    assert len(list(folder.glob("book 0[1-9] *.md"))) == 4
+    # the figure the Markdown links travels with the folder
+    assert (folder / "images" / "0000-0009_page_0_Figure_1.jpeg").exists()
+
+
+def test_an_article_is_not_offered_a_chapter_split(finished_book):
+    """A journal article stays one note: no button, and the page says why."""
+    pdf, out = finished_book  # two pages
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+    result = _tab(at, "Result")
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert not any("chapters" in b.label.lower() for b in result.button)
+    assert any("article" in c.value for c in result.caption)
+    assert not (out / "chapters").exists()
+
+
+def test_a_new_pdf_in_the_library_does_not_change_the_open_document(make_pdf, tmp_path):
+    """Uploading a book switched the page to a different one.
+
+    The picker had no key, so Streamlit identified it by its label and options.
+    An upload is saved into the library, the next run discovers one more PDF,
+    the options differ -- and Streamlit treats that as a new widget and resets it
+    to index 0: whichever book sorts first opened in place of the one in use.
+    """
+    make_pdf("a.pdf", pages=1)
+    b = make_pdf("b.pdf", pages=1)
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), b)
+
+    (tmp_path / "uploads").mkdir()
+    make_pdf("uploads/c.pdf", pages=1)
+    at.run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert at.sidebar.selectbox[0].value == "b.pdf"
+    assert at.header[0].value == "b.pdf"
+
+
+def test_an_uploaded_book_opens_and_stays_open(make_pdf, tmp_path):
+    """After an upload the page shows the uploaded book -- and still does after
+    the next click, which is when the reset used to happen."""
+    import pymupdf
+
+    make_pdf("a.pdf", pages=1)
+    doc = pymupdf.open()
+    doc.new_page().insert_text((72, 72), "An uploaded book.")
+    content = doc.tobytes()
+    doc.close()
+
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    at.run()
+    at.sidebar.selectbox[0].set_value("Upload a file…").run()
+    at.sidebar.file_uploader[0].upload("new.pdf", content, "application/pdf").run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert (tmp_path / "uploads" / "new.pdf").exists()
+    assert at.sidebar.selectbox[0].value == "uploads/new.pdf"
+    assert at.header[0].value == "new.pdf"
+
+    at.run()  # any later interaction reruns the whole script
+    assert at.sidebar.selectbox[0].value == "uploads/new.pdf"

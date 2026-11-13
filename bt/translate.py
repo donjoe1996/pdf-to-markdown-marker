@@ -734,6 +734,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pages-per-chunk", type=int, default=DEFAULT_PAGES_PER_CHUNK)
     ap.add_argument("--chunk-dir", type=Path, default=None)
     ap.add_argument("--no-resume", action="store_true")
+    ap.add_argument(
+        "--no-chapters",
+        action="store_true",
+        help="do not also write one file per chapter (bt.chapters) when done",
+    )
     args = ap.parse_args(argv)
 
     if not args.src.exists():
@@ -771,7 +776,16 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print(stats.render())
     print(f"\nWrote {out}")
-    return 1 if stats.stopped_early else 0
+    if stats.stopped_early:
+        return 1
+    if not args.no_chapters:
+        # Only a finished book. Split part-way, its last chapter simply ends
+        # early, and nothing in the vault would say the rest is missing.
+        from bt import chapters
+
+        print()
+        print(chapters.export(out).render())
+    return 0
 
 
 if __name__ == "__main__":

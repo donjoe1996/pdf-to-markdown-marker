@@ -140,9 +140,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # -- Stage 3: cleanup -------------------------------------------------
     print("\n== Stage 3: post-processing ==")
-    from bt.postprocess import process
+    from bt.postprocess import process, read_outline
 
-    cleaned, stats = process(raw_md.read_text(encoding="utf-8"))
+    # The PDF's bookmarks, where it has any, are the publisher's statement of
+    # the heading structure; marker only guesses it from type size.
+    cleaned, stats = process(
+        raw_md.read_text(encoding="utf-8"), outline=read_outline(ocr_pdf)
+    )
     final_md.write_text(cleaned, encoding="utf-8")
     print(stats.render())
     print(f"\nWrote {final_md}")

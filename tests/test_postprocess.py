@@ -20,6 +20,8 @@ from bt.postprocess import (
     process,
     reflow_lines,
     split_pages,
+    tidy_links,
+    unlink_dangling,
 )
 from tests.conftest import marker_markdown
 
@@ -117,8 +119,8 @@ def test_footnote_ids_are_namespaced_per_page():
     document and no reference resolves.
     """
     stats = Stats()
-    first = namespace_footnotes("text<sup>1</sup>", 4, stats)
-    second = namespace_footnotes("text<sup>1</sup>", 9, stats)
+    first = namespace_footnotes("text<sup>1</sup>\n\n<sup>1</sup> A note.", 4, stats)
+    second = namespace_footnotes("text<sup>1</sup>\n\n<sup>1</sup> Another.", 9, stats)
     assert "[^p4-1]" in first
     assert "[^p9-1]" in second
     assert first != second
@@ -272,9 +274,10 @@ def test_inline_footnote_ref_at_line_start_stays_a_reference():
     broken before the marker). Left on its own line, namespacing reads any
     marker that opens a line as a *definition* and adds a colon -- a reference
     in the middle of a sentence silently becomes a bogus footnote."""
-    out, _ = process(marker_markdown(["while he looked on?\n<sup>366</sup>\nHe has a power"]))
+    page = "while he looked on?\n<sup>366</sup>\nHe has a power\n\n<sup>366</sup> The note."
+    out, _ = process(marker_markdown([page]))
     assert "on?[^p0-366] He has a power" in out or "on? [^p0-366] He has a power" in out
-    assert "[^p0-366]:" not in out
+    assert out.count("[^p0-366]:") == 1, "only the note itself is a definition"
 
 
 def test_footnote_block_keeps_one_note_per_line():
@@ -479,3 +482,151 @@ def test_ligatures_and_invisible_characters_are_normalised():
     out, stats = process(marker_markdown([raw]))
     assert "the first flow of été with zerowidth and no break" in out
     assert stats.chars_cleaned > 0
+
+
+# --------------------------------------------------------------------------
+# a born-digital paper: superscripts, citation links, labels, the outline
+# --------------------------------------------------------------------------
+def test_superscript_without_a_note_is_not_a_footnote():
+    """REGRESSION: every superscript became a footnote reference.
+
+    In a journal article the indices of an equation came out as "[^p9-i]" and
+    "[^p9-5]" -- references to notes that do not exist. A marker is a footnote
+    only where its page also defines it.
+    """
+    out = namespace_footnotes("the sum over p<sup>i</sup> for i up to <sup>5</sup>.", 9, Stats())
+    assert "[^" not in out
+    assert "<sup>i</sup>" in out and "<sup>5</sup>" in out
+
+
+def test_defined_footnote_is_still_namespaced():
+    stats = Stats()
+    out = namespace_footnotes("A claim.<sup>1</sup> More.\n\n<sup>1</sup> The note.", 3, stats)
+    assert "A claim.[^p3-1] More." in out
+    assert "[^p3-1]: The note." in out
+    assert stats.footnotes_namespaced == 2
+
+
+def test_notes_run_together_on_one_line_each_get_a_definition():
+    """REGRESSION: an affiliation block is one line of several notes.
+
+    Only the first got its colon, so the line was a single definition whose
+    text contained the other markers, and notes 2 and 3 resolved to nothing.
+    """
+    page = "Ann Lee<sup>2</sup>\n\n<sup>1</sup>Alpha Lab, Zurich. <sup>2</sup>Beta Inc, Oslo."
+    out = namespace_footnotes(page, 0, Stats())
+    assert "[^p0-1]: Alpha Lab, Zurich.\n[^p0-2]: Beta Inc, Oslo." in out
+    assert "Ann Lee[^p0-2]" in out
+
+
+@pytest.mark.parametrize(
+    ("raw", "fixed"),
+    [
+        ("biodiversit[y2](#page-19-1) , and", "biodiversity[2](#page-19-1), and"),
+        ("(SDPT[\\)15](#page-19-14),[16](#page-19-15) compiles", "(SDPT)[15](#page-19-14),[16](#page-19-15) compiles"),
+        ("properties[27.](#page-19-26) A mature", "properties[27](#page-19-26). A mature"),
+        ("label[s14](#a)[,39](#b) resolved", "labels[14](#a),[39](#b) resolved"),
+        ("Fig. [3.](#page-3-0)", "Fig. [3](#page-3-0)."),
+        ("sources (Table [1\\)](#page-6-0) are", "sources (Table [1](#page-6-0)) are"),
+    ],
+)
+def test_citation_link_gives_back_stolen_characters(raw, fixed):
+    """REGRESSION: the link swallowed the last letter of the word before it.
+
+    marker takes link text from the PDF's link rectangle, which overlaps the
+    neighbouring glyphs: 45 words in one paper read "biodiversit", "presen",
+    "dat" with the missing letter inside the link.
+    """
+    stats = Stats()
+    assert tidy_links(raw, stats) == fixed
+    assert stats.links_tidied
+
+
+@pytest.mark.parametrize("line", ["see [the appendix](#app-1) for more", "item [a7](#x) alone", "[12](#r)"])
+def test_tidy_links_leaves_ordinary_links_alone(line):
+    assert tidy_links(line, Stats()) == line
+
+
+def test_dead_internal_link_is_unlinked_but_stays_readable():
+    """REGRESSION: links to a target in another chunk went nowhere.
+
+    marker writes a target only when its page is in the range converted. The
+    number must stay a superscript where it was attached to a word: flattened,
+    "by 2030" cited as 5 reads "by 20305".
+    """
+    text = "by 2030[5](#c0000-page-19-4),[6](#c0000-page-19-5). See Table [2](#c0000-page-12-0)."
+    stats = Stats()
+    out = unlink_dangling(text, stats)
+    assert out == "by 2030<sup>5</sup>,<sup>6</sup>. See Table 2."
+    assert stats.links_unlinked == 3
+
+
+def test_live_internal_link_is_kept():
+    text = 'cover[7](#c0010-page-19-5).\n\n- <span id="c0010-page-19-5"></span>7. Hansen.'
+    assert unlink_dangling(text, Stats()) == text
+
+
+def test_page_bridge_does_not_join_onto_a_label():
+    """REGRESSION: the continuation was glued to a sidebar label.
+
+    marker put the journal's "Data Descriptor" tag last on page 0. It has no
+    sentence end, so it passed for the cut paragraph: the real one stayed cut
+    and the output read "**Data Descriptor** baseline that records...".
+    """
+    text = marker_markdown(
+        ["Monitoring requires a static typological\n\n**Data Descriptor**",
+         "baseline that records the forest type.\n\nNext paragraph."]
+    )
+    out, stats = process(text, heads=False)
+    assert "a static typological baseline that records the forest type." in out
+    assert "**Data Descriptor** baseline" not in out
+    assert stats.pages_bridged == 1
+
+
+OUTLINE = [
+    (1, "A study of forest types", 0),
+    (2, "Background", 0),
+    (2, "Methods", 1),
+    (3, "Input data. ", 1),
+    (2, "Fig. 1 A map of the classes in the first region.", 1),
+]
+
+
+def test_outline_sets_heading_levels_and_promotes_run_in_headings():
+    """REGRESSION: a paper with 42 bookmarks came out with 16 headings.
+
+    marker guesses levels from type size (siblings were #, #### and ##) and a
+    run-in sub-heading is only bold text. The PDF's bookmarks say what the
+    structure is.
+    """
+    text = marker_markdown(
+        [
+            "# **A study of forest types OPEN**\n\n# **Background**\n\nProse one.",
+            "#### **Methods**\n\n**Input data.** The input is this.\n\n"
+            "**Fig. 1** A map of the classes in the first region.\n\n"
+            "# **Data availability**\n\nIt is available.",
+        ]
+    )
+    out, stats = process(text, heads=False, outline=OUTLINE)
+    lines = out.split("\n")
+    assert "# **A study of forest types**" in lines
+    assert "OPEN" in lines, "the badge is kept, just not as part of the title"
+    assert "## **Background**" in lines
+    assert "## **Methods**" in lines
+    assert "### **Input data.**" in lines and "The input is this." in lines
+    assert "## **Data availability**" in lines, "unknown heading: sibling of the last known"
+    assert "**Fig. 1** A map of the classes in the first region." in lines, "a caption is not a heading"
+    assert stats.headings_promoted == 1
+
+
+def test_outline_keeps_a_smaller_unknown_heading_below_its_section():
+    text = marker_markdown(["# **Methods**\n\nProse.\n\n### **A detail**\n\nMore."], start=1)
+    out, _ = process(text, heads=False, outline=OUTLINE)
+    assert "## **Methods**" in out and "### **A detail**" in out
+
+
+def test_without_an_outline_headings_are_untouched():
+    text = marker_markdown(["#### **Methods**\n\n**Input data.** The input is this."])
+    out, _ = process(text, heads=False)
+    assert "#### **Methods**" in out
+    assert "**Input data.** The input is this." in out

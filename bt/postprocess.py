@@ -214,6 +214,34 @@ FENCE = re.compile(r"^(```|~~~|\$\$)")
 NOTE_START = re.compile(r"^(?:<sup>[0-9ivxIVX]{1,4}</sup>|\[\^[0-9ivxIVX]{1,4}\])")
 TRAILING_HYPHEN = re.compile(r"\w[-‐‑]$")
 
+# Footnotes. A marker is a note only where its page also *defines* it -- a
+# marker opening a line. Superscripts are used for much else (author
+# affiliations, exponents, the indices of an equation), and treating every one
+# as a reference produced ids like "[^p9-i]" that pointed at nothing.
+_NOTE_ID = r"[0-9ivxIVX]{1,4}"
+_NOTE_MARK = rf"(?:<sup>{_NOTE_ID}</sup>|\[\^{_NOTE_ID}\])"
+NOTE_DEF_LINE = re.compile(rf"(?m)^[ \t]*(?:<sup>({_NOTE_ID})</sup>|\[\^({_NOTE_ID})\])")
+# Several notes set as one running line ("1 Zurich. 2 Washington. 3 ..."):
+# the next marker after a sentence end starts the next note.
+NOTE_RUN_ON = re.compile(rf"(?<=[.;])[ \t]+(?={_NOTE_MARK}[ \t]*\S)")
+
+# Links inside the document: "[text](#fragment)". marker builds them from the
+# PDF's own link rectangles, which are drawn around the superscript and
+# routinely take the neighbouring glyph with them.
+INTERNAL_LINK = re.compile(r"(?<!!)\[([^\]\n]*)\]\(#([^)\s]+)\)")
+_CITATION_TEXT = re.compile(r"(\\?[^\W\d_]|\\?[),;])?(\d[\d\u2013-]*)(\\?\)|[.,;:])?")
+_SPACE_AFTER_LINK = re.compile(r"(\]\(#[^)\s]+\))[ \t]+(?=[,.;:](?:\s|$))")
+ANCHOR_TARGET = re.compile(r"""id=["']([^"']+)["']""")
+
+# A paragraph that is nothing but one short emphasised phrase is a label --
+# a sidebar tag, a section badge -- not the sentence a page break cut.
+_LABEL = re.compile(r"^(\*\*|__)[^*_\n]{1,60}\1$")
+
+HEADING = re.compile(r"^(#{1,6})[ \t]+(.*\S)[ \t]*$")
+RUN_IN = re.compile(r"^\*\*([^*\n]{2,120})\*\*[ \t]+(\S.*)$")
+OUTLINE_PAGE_SLACK = 1  # a heading may sit one page off its bookmark
+OUTLINE_PREFIX_MIN = 12  # letters a title needs before a prefix match counts
+
 
 @dataclass
 class Stats:
@@ -226,6 +254,10 @@ class Stats:
     lines_joined: int = 0
     pages_bridged: int = 0
     chars_cleaned: int = 0
+    links_tidied: int = 0
+    links_unlinked: int = 0
+    headings_levelled: int = 0
+    headings_promoted: int = 0
     margin_sequence: list[int] = field(default_factory=list)
     head_forms: list[str] = field(default_factory=list)
 
@@ -244,6 +276,10 @@ class Stats:
             f"compound hyphens kept: {self.hyphens_kept}",
             f"line breaks reflowed : {self.lines_joined}",
             f"page breaks bridged  : {self.pages_bridged}",
+            f"citation links tidied: {self.links_tidied}",
+            f"dead links unlinked  : {self.links_unlinked}",
+            f"headings from outline: {self.headings_levelled} levelled, "
+            f"{self.headings_promoted} promoted",
         ]
         if self.head_forms:
             shown = ", ".join(repr(f) for f in self.head_forms[:4])
@@ -372,22 +408,196 @@ def namespace_footnotes(page: str, page_no: int, stats: Stats) -> str:
     The book restarts footnote numbering on every page and uses two series
     (arabic for the translators' notes, roman for Heidegger's marginalia), so
     a document-wide ``[^1]`` would be defined hundreds of times.
+
+    Only markers the page defines are footnotes. A superscript with no note
+    under it is something else -- an exponent, an index, an affiliation -- and
+    is left exactly as it came.
     """
+    # One definition per note, before deciding what is defined: a line of
+    # several notes would otherwise define only its first.
+    page = "\n".join(
+        NOTE_RUN_ON.sub("\n", line) if NOTE_START.match(line.lstrip()) else line
+        for line in page.split("\n")
+    )
+    defined = {m.group(1) or m.group(2) for m in NOTE_DEF_LINE.finditer(page)}
 
-    def sup(m: re.Match) -> str:
+    def mark(m: re.Match) -> str:
+        if m.group(1) not in defined:
+            return m.group(0)
         stats.footnotes_namespaced += 1
         return f"[^p{page_no}-{m.group(1)}]"
 
-    def ref(m: re.Match) -> str:
-        stats.footnotes_namespaced += 1
-        return f"[^p{page_no}-{m.group(1)}]"
-
-    page = SUP_MARKER.sub(sup, page)
-    page = MD_FOOTNOTE_REF.sub(ref, page)
+    page = SUP_MARKER.sub(mark, page)
+    page = MD_FOOTNOTE_REF.sub(mark, page)
     # A marker that opens a line is the note's definition, not a reference to
     # it; Markdown needs a colon there for the footnote to resolve.
-    page = re.sub(r"(?m)^(\[\^p\d+-[0-9ivxIVX]{1,4}\])(?!:)\s+", r"\1: ", page)
+    page = re.sub(r"(?m)^(\[\^p\d+-[0-9ivxIVX]{1,4}\])(?!:)\s*", r"\1: ", page)
     return page
+
+
+def tidy_links(page: str, stats: Stats) -> str:
+    """Give a citation link back the characters that are not the citation.
+
+    marker's link text comes from the PDF's link rectangle, which overlaps the
+    glyphs beside a superscript: "biodiversit[y2](#..)", "[\\)15](#..)",
+    "[27.](#..)". The word loses its last letter to the link and the sentence
+    its punctuation. Only a link whose text is otherwise a number is touched.
+    """
+
+    def fix(m: re.Match) -> str:
+        c = _CITATION_TEXT.fullmatch(m.group(1))
+        if not c or not (c.group(1) or c.group(3)):
+            return m.group(0)
+        lead = (c.group(1) or "").lstrip("\\")
+        before = m.string[m.start() - 1] if m.start() else ""
+        if lead.isalpha() and not before.isalpha():
+            return m.group(0)  # "[a7]" is only a stolen letter after "dat"
+        stats.links_tidied += 1
+        trail = (c.group(3) or "").lstrip("\\")
+        return f"{lead}[{c.group(2)}](#{m.group(2)}){trail}"
+
+    page = INTERNAL_LINK.sub(fix, page)
+    return _SPACE_AFTER_LINK.sub(r"\1", page)
+
+
+def unlink_dangling(text: str, stats: Stats) -> str:
+    """Remove links whose target is nowhere in the document.
+
+    marker only writes a link's target when the target page is in the range it
+    was given, so a citation on page 3 of a reference on page 19 has no anchor
+    when the two fall in different chunks. A dead link is replaced by its text;
+    a number attached to the preceding word was a superscript and stays one,
+    or "by 2030" + "5" would read "by 20305".
+    """
+    targets = set(ANCHOR_TARGET.findall(text))
+
+    def fix(m: re.Match) -> str:
+        label, frag = m.group(1), m.group(2)
+        if frag in targets:
+            return m.group(0)
+        stats.links_unlinked += 1
+        before = m.string[m.start() - 1] if m.start() else " "
+        if _CITATION_TEXT.fullmatch(label) and not before.isspace() and before != "(":
+            return f"<sup>{label}</sup>"
+        return label
+
+    return INTERNAL_LINK.sub(fix, text)
+
+
+def _title_key(text: str) -> str:
+    """A title reduced to its letters and digits, for matching across markup."""
+    return re.sub(r"[\W_]+", "", text.replace("\u00ad", "").lower())
+
+
+def read_outline(pdf_path) -> list[tuple[int, str, int]]:
+    """The PDF's bookmarks as ``(level, title, zero-based page)``.
+
+    Empty when the PDF has none (most scans) or cannot be read: the outline
+    only ever improves headings, so its absence must not stop a run.
+    """
+    try:
+        import pymupdf
+
+        with pymupdf.open(pdf_path) as doc:
+            toc = doc.get_toc()
+    except Exception:  # noqa: BLE001 - any unreadable PDF means "no outline"
+        return []
+    return [(lvl, title.strip(), page - 1) for lvl, title, page in toc if title.strip()]
+
+
+class Outline:
+    """Heading structure taken from the PDF's own bookmarks.
+
+    marker guesses a heading's level from its type size, page by page, so
+    sibling sections come out as ``#``, ``####`` and ``##``; and a sub-heading
+    set run-in ("**Input data.** The primary input...") is not a heading at
+    all. Where the PDF carries an outline, that is the publisher's statement
+    of the structure, and it is used instead of the guess.
+    """
+
+    def __init__(self, entries: list[tuple[int, str, int]]):
+        self.by_key: dict[str, list[tuple[int, int]]] = {}
+        top = min((lvl for lvl, _, _ in entries), default=1)
+        for lvl, title, page in entries:
+            key = _title_key(title)
+            if key:
+                self.by_key.setdefault(key, []).append((lvl - top + 1, page))
+        # (level given, marker's level) of the last heading the outline knew
+        self.last: tuple[int, int] | None = None
+
+    def __bool__(self) -> bool:
+        return bool(self.by_key)
+
+    def _find(self, key: str, page_no: int) -> int | None:
+        near = [
+            (abs(page - page_no), lvl)
+            for lvl, page in self.by_key.get(key, [])
+            if abs(page - page_no) <= OUTLINE_PAGE_SLACK
+        ]
+        return min(near)[1] if near else None
+
+    def _heading(self, hashes: str, body: str, page_no: int, stats: Stats) -> str:
+        key = _title_key(body)
+        level = self._find(key, page_no)
+        extra = ""
+        if level is None:
+            # A badge or kicker fused onto the title: "...monitoring OPEN".
+            prefixes = [
+                k for k in self.by_key
+                if len(k) >= OUTLINE_PREFIX_MIN and key.startswith(k)
+                and self._find(k, page_no) is not None
+            ]
+            if prefixes:
+                title_key = max(prefixes, key=len)
+                level = self._find(title_key, page_no)
+                seen = cut = 0
+                for cut, ch in enumerate(body):  # noqa: B007 - cut is the result
+                    if seen == len(title_key):
+                        break
+                    seen += bool(_title_key(ch))
+                extra = body[cut:].strip(" *_")
+                bold = "**" if body.startswith("**") else ""
+                body = body[:cut].rstrip(" *_") + bold
+        if level is not None:
+            self.last = (level, len(hashes))
+        elif self.last is not None:
+            # Unknown to the outline: a sibling of the last known heading, or
+            # one step below it if marker set it smaller.
+            level = self.last[0] + (len(hashes) > self.last[1])
+        else:
+            return f"{hashes} {body}"
+        level = min(level, 6)
+        if level != len(hashes):
+            stats.headings_levelled += 1
+        line = f"{'#' * level} {body}"
+        return f"{line}\n\n{extra}" if extra else line
+
+    def apply(self, page: str, page_no: int, stats: Stats) -> str:
+        out: list[str] = []
+        fence: str | None = None
+        blank_before = True
+        for line in page.split("\n"):
+            s = line.strip()
+            m = FENCE.match(s)
+            if fence is not None or (m and (m.group(1) != "$$" or s == "$$")):
+                if fence is None:
+                    fence = m.group(1)
+                elif s.startswith(fence):
+                    fence = None
+                out.append(line)
+                continue
+            h = HEADING.match(s)
+            r = RUN_IN.match(s) if blank_before and not h else None
+            if h:
+                line = self._heading(h.group(1), h.group(2), page_no, stats)
+            elif r:
+                level = self._find(_title_key(r.group(1)), page_no)
+                if level is not None:
+                    stats.headings_promoted += 1
+                    line = f"{'#' * min(level, 6)} **{r.group(1)}**\n\n{r.group(2)}"
+            out.append(line)
+            blank_before = not s
+        return "\n".join(out)
 
 
 @dataclass
@@ -529,9 +739,15 @@ def _bridge(
     """
     paras = re.split(r"\n{2,}", before)
     # The page's notes sit under its text, so the paragraph the break cut is
-    # the last one that is not a note.
+    # the last one that is not a note -- nor a label: a sidebar tag marker
+    # placed last on the page ("**Data Descriptor**") has no sentence end
+    # either, and the continuation was once glued to it instead of the text.
     at = next(
-        (i for i in range(len(paras) - 1, -1, -1) if not NOTE_DEFINITION.match(paras[i])),
+        (
+            i
+            for i in range(len(paras) - 1, -1, -1)
+            if not NOTE_DEFINITION.match(paras[i]) and not _LABEL.match(paras[i].strip())
+        ),
         None,
     )
     if at is None:
@@ -606,8 +822,13 @@ def process(
     reflow: bool = True,
     bridge: bool = True,
     clean: bool = True,
+    links: bool = True,
+    outline: list[tuple[int, str, int]] | None = None,
 ) -> tuple[str, Stats]:
+    """Clean marker's Markdown. ``outline`` is ``read_outline()`` of the PDF
+    the text came from; with it, headings follow the PDF's bookmarks."""
     stats = Stats()
+    structure = Outline(outline or [])
     if clean:
         text = clean_characters(text, stats)
     pages = split_pages(text)
@@ -641,6 +862,11 @@ def process(
         # otherwise become a bogus note.
         if reflow:
             page = reflow_lines(page, stats)
+        # After reflow, so a paragraph's opening is the start of its line.
+        if structure:
+            page = structure.apply(page, page_no, stats)
+        if links:
+            page = tidy_links(page, stats)
         if footnotes:
             page = namespace_footnotes(page, page_no, stats)
         done.append((page_no, page.strip()))
@@ -658,6 +884,10 @@ def process(
         for page_no, body in done
         if body
     )
+    # Whole document, and after footnotes: a link's target may be on any page,
+    # and the superscripts this leaves must not be read as footnote markers.
+    if links:
+        out = unlink_dangling(out, stats)
     # Collapse the runs of blank lines left behind by removed lines.
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out, stats
@@ -694,6 +924,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="keep the PDF's line breaks instead of one line per paragraph",
     )
+    ap.add_argument(
+        "--no-links",
+        action="store_true",
+        help="leave citation links as marker wrote them, dead ones included",
+    )
+    ap.add_argument(
+        "--pdf",
+        type=Path,
+        help="the PDF this Markdown came from; its bookmarks, if it has any, "
+        "set the heading levels and turn run-in sub-headings into headings",
+    )
     args = ap.parse_args(argv)
 
     text = args.src.read_text(encoding="utf-8")
@@ -706,6 +947,8 @@ def main(argv: list[str] | None = None) -> int:
         reflow=not args.no_reflow,
         bridge=not args.no_bridge,
         clean=not args.no_clean,
+        links=not args.no_links,
+        outline=read_outline(args.pdf) if args.pdf else None,
     )
     print(stats.render())
 

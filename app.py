@@ -315,6 +315,32 @@ def translation_panel(folder: Path, translated_md: Path) -> None:
             chapters_section(translated_md, "translation")
 
 
+@st.dialog("Delete progress?", icon=":material/delete_sweep:")
+def confirm_clear(files: list[Path], also, what: str) -> None:
+    """Confirm before deleting finished chunks -- hours of work, not undoable.
+
+    It used to be one click on a secondary button beside Resume. The count is
+    named so the cost is visible, and Cancel is the easy way out.
+    """
+    n = len(files)
+    st.markdown(
+        f"This deletes **{n} {what} chunk{'s' if n != 1 else ''}**. The next run "
+        "starts from the first page again. This cannot be undone."
+    )
+    row = st.container(horizontal=True, horizontal_alignment="right")
+    if row.button("Cancel"):
+        st.rerun()
+    if row.button(
+        f"Delete {n} chunk{'s' if n != 1 else ''}",
+        type="primary",
+        icon=":material/delete:",
+    ):
+        for f in files:
+            f.unlink(missing_ok=True)
+        also()
+        st.rerun()
+
+
 # --------------------------------------------------------------------------
 # sidebar: the document scope -- what to work on, and where its output goes
 # --------------------------------------------------------------------------
@@ -385,12 +411,16 @@ default_out = bt_queue.resolve_out_dir(pdf_path)
 chunks_in = bt_queue.chunks_in
 default_label = shown(default_out, LIBRARY)
 
-out_text = st.sidebar.text_input(
-    "Output folder",
-    value=default_label,
-    help="Holds chunks/, raw.md and the final Markdown. Point it at an existing "
-    "folder to resume that run.",
-)
+# Collapsed: it is right on almost every run, and the header shows where output
+# goes. Still the first sidebar text input, which the smoke tests rely on.
+with st.sidebar.expander("Output folder"):
+    out_text = st.text_input(
+        "Output folder",
+        value=default_label,
+        label_visibility="collapsed",
+        help="Holds chunks/, raw.md and the final Markdown. Point it at an "
+        "existing folder to resume that run.",
+    )
 out_dir = Path(out_text) if Path(out_text).is_absolute() else LIBRARY / out_text
 existing_chunks = chunks_in(out_dir)
 if existing_chunks:
@@ -435,13 +465,29 @@ st.caption(
 
 info = cached_analysis(str(pdf_path), stat.st_mtime, stat.st_size)
 
-# Bordered metrics rather than a bare row: at a glance this is one card of
-# document facts, not four numbers floating above whatever section follows.
-f1, f2, f3, f4 = st.columns(4)
-f1.metric("Pages in file", info.pages, border=True)
-f2.metric("Pages to process", info.output_pages, border=True)
-f3.metric("Text layer", info.text_verdict.replace("_", " "), border=True)
-f4.metric("Estimated", info.estimate_human(), border=True)
+# One line of facts, not four metric cards. The cards sat above *every* tab --
+# including Queue, where they say nothing -- and pushed each tab's own content,
+# the Start button among it, below the fold. These are context for the
+# decisions in the tabs, not the decisions themselves.
+TEXT_LAYER = {
+    "born_digital": "Born-digital text",
+    "bad_ocr": "Old OCR text layer",
+    "no_text": "No text layer",
+}
+facts = st.container(horizontal=True, vertical_alignment="center")
+pages_fact = f"{info.pages} pages"
+if info.output_pages != info.pages:
+    pages_fact += f" → {info.output_pages} after splitting"
+facts.badge(pages_fact, icon=":material/description:", color="gray")
+facts.badge(
+    TEXT_LAYER.get(info.text_verdict, info.text_verdict),
+    icon=":material/text_fields:",
+    color="gray",
+    help=info.text_reason,
+)
+facts.badge(
+    f"Estimated {info.estimate_human()}", icon=":material/schedule:", color="gray"
+)
 
 # --------------------------------------------------------------------------
 # status strip: above the tabs, so a running job can be stopped from anywhere.
@@ -499,8 +545,32 @@ with tab_transcribe:
     settings_col, preview_col = st.columns([2, 3], gap="medium")
 
     with settings_col:
-        st.subheader("Settings")
+        # Recognition over recall: the verdict the defaults came from sits next
+        # to the defaults, instead of having to be remembered from elsewhere.
+        st.caption(
+            f":material/auto_awesome: Pre-filled from the analysis — "
+            f"{'spreads' if info.is_spread else 'single pages'}, "
+            f"{TEXT_LAYER.get(info.text_verdict, info.text_verdict).lower()}. "
+            "Change anything that looks wrong."
+        )
         with st.container(border=True):
+            # Labelled by what each engine is *for*: a tool name alone asks the
+            # reader to already know the difference.
+            ENGINES = {
+                "marker": "marker · scans",
+                "docling": "Docling · journals",
+            }
+            default_engine = "marker" if info.recommend_ocr else "docling"
+            engine = st.segmented_control(
+                "Engine",
+                list(ENGINES),
+                default=default_engine,
+                required=True,
+                format_func=ENGINES.get,
+                help="marker reads page images with a vision model — right for "
+                "scans. Docling uses layout and table-structure models and, with "
+                "OCR off, the PDF's own text — right for born-digital articles.",
+            ) or default_engine
             # Pre-filled from the analysis, still editable -- the analysis is a
             # strong guess, not an authority.
             split = st.checkbox(
@@ -515,42 +585,40 @@ with tab_transcribe:
                 help="Off reads the PDF's existing text layer instead — seconds "
                 "rather than hours, but only right when that layer is trustworthy.",
             )
-            engine = st.selectbox(
-                "Engine",
-                ["marker", "docling"],
-                index=0 if info.recommend_ocr else 1,
-                help="marker reads page images with a vision model — right for "
-                "scanned books. Docling uses layout and table-structure models "
-                "and, with Run OCR off, the PDF's own text — right for journal "
-                "articles with tables.",
-            )
             images = st.checkbox(
                 "Extract figures",
                 value=False,
                 help="Saves charts, plates and figures to a folder named after "
-                "the book beside the Markdown, and links them from it. On a "
-                "text-only book every "
-                "'figure' found is a false positive costing disk, so this is off "
-                "unless the document has them.",
+                "the book beside the Markdown, and links them from it. Off "
+                "unless the document has them: on a text-only book every "
+                "'figure' found is a false positive costing disk.",
             )
-            st.divider()
-            dpi = st.select_slider(
-                "DPI",
-                [150, 192, 300, 400],
-                value=300,
-                help="Does not change speed — the cost is tokens generated, not "
-                "pixels read.",
-            )
-            chunk_size = st.number_input(
-                "Pages per chunk",
-                1,
-                100,
-                10,
-                help="Smaller chunks resume more finely and check disk more often.",
-            )
-            pages = st.text_input(
-                "Page range (optional)", "", placeholder="e.g. 0-9 or 8,40-41"
-            )
+
+            # One level of disclosure, no deeper. These are right on almost
+            # every run -- DPI is measured not to change speed at all -- so they
+            # are one click away rather than competing with the choices above.
+            with st.expander("Advanced"):
+                dpi = st.select_slider(
+                    "DPI",
+                    [150, 192, 300, 400],
+                    value=300,
+                    help="Does not change speed — the cost is tokens generated, "
+                    "not pixels read. Keep 300.",
+                )
+                chunk_size = st.number_input(
+                    "Pages per chunk",
+                    1,
+                    100,
+                    10,
+                    help="Smaller chunks resume more finely and check disk more often.",
+                )
+                pages = st.text_input(
+                    "Page range (optional)", "", placeholder="e.g. 0-9 or 8,40-41"
+                )
+                st.caption(
+                    f"Spreads: {info.spread_reason} · Text layer: {info.text_reason}"
+                    f" · Producer `{info.producer or 'none'}`"
+                )
 
         if not ocr and info.recommend_ocr:
             st.warning(
@@ -564,62 +632,23 @@ with tab_transcribe:
                 icon=":material/warning:",
             )
 
-        with st.expander("Why these settings", expanded=False):
-            st.markdown(
-                f"- **Spreads:** {'yes' if info.is_spread else 'no'} — {info.spread_reason}\n"
-                f"- **Text layer:** `{info.text_verdict}` — {info.text_reason}\n"
-                f"- **Producer:** `{info.producer or 'none'}`  ·  "
-                f"{info.chars_per_page:.0f} chars/page  ·  "
-                f"{info.scanned_ratio:.0%} full-page images"
-            )
-
-    with preview_col:
-        # Beside the settings, not below them: the preview exists to catch a
-        # wrong guess before a multi-hour run, which it can only do if the guess
-        # and its consequence are on screen together.
-        st.subheader("Preview")
-        with st.container(border=True):
-            # Default to the middle of the document: front matter is often blank
-            # or a title page, which tells you nothing about the settings.
-            if info.pages > 1:
-                idx = st.slider("Page", 0, info.pages - 1, info.pages // 2)
-            else:
-                # st.slider raises when min == max, which took the whole page
-                # down on any one-page document -- there is nothing to choose
-                # between, so do not ask.
-                idx = 0
-            if split:
-                left, right, gutter, band = render_halves(
-                    str(pdf_path), idx, 110, stat.st_mtime
-                )
-                p1, p2 = st.columns(2)
-                p1.image(left, caption=f"page {idx} · left", width="stretch")
-                p2.image(right, caption=f"page {idx} · right", width="stretch")
-                st.caption(f"Cut at {gutter:.1%} of width (blank band {band:.1%} wide)")
-            else:
-                st.image(
-                    render_page(str(pdf_path), idx, 110, stat.st_mtime),
-                    caption=f"page {idx}",
-                    width="stretch",
-                )
-
-    st.subheader("Run")
-    total_pages = info.pages * 2 if split else info.pages
-    total_chunks = ceil_div(total_pages, int(chunk_size))
-    spec = jobs.JobSpec(
-        pdf=str(pdf_path),
-        out_dir=str(out_dir),
-        split=split,
-        ocr=ocr,
-        dpi=int(dpi),
-        chunk_size=int(chunk_size),
-        pages=pages.strip() or None,
-        total_pages=total_pages,
-        images=images,
-        engine=engine,
-    )
-
-    with st.container(border=True):
+        # The primary action sits directly under the decisions it launches. It
+        # used to come after the page preview, below the fold, so the one button
+        # this tab exists for was the one thing not on screen.
+        total_pages = info.pages * 2 if split else info.pages
+        total_chunks = ceil_div(total_pages, int(chunk_size))
+        spec = jobs.JobSpec(
+            pdf=str(pdf_path),
+            out_dir=str(out_dir),
+            split=split,
+            ocr=ocr,
+            dpi=int(dpi),
+            chunk_size=int(chunk_size),
+            pages=pages.strip() or None,
+            total_pages=total_pages,
+            images=images,
+            engine=engine,
+        )
         busy = bool(runs)
         if busy:
             others = [r.name for r in runs if str(pdf_path) != r.pdf]
@@ -653,17 +682,48 @@ with tab_transcribe:
             if job.chunks_done and controls.button(
                 "Clear progress", icon=":material/delete_sweep:"
             ):
-                for f in (out_dir / "chunks").glob("*.md"):
-                    f.unlink()
-                jobs.clear_lock(out_dir)
-                st.rerun()
+                confirm_clear(
+                    sorted((out_dir / "chunks").glob("*.md")),
+                    lambda: jobs.clear_lock(out_dir),
+                    "transcribed",
+                )
         if job.chunks_done and not job.running:
             st.caption(
                 f"{job.chunks_done} chunks are already transcribed in "
                 f"`{out_dir.name}/chunks/` and will be skipped."
             )
 
-        progress_panel(out_dir, int(chunk_size), total_chunks)
+    with preview_col:
+        # Beside the settings, not below them: the preview exists to catch a
+        # wrong guess before a multi-hour run, which it can only do if the guess
+        # and its consequence are on screen together.
+        with st.container(border=True):
+            # Default to the middle of the document: front matter is often blank
+            # or a title page, which tells you nothing about the settings.
+            if info.pages > 1:
+                idx = st.slider("Preview page", 0, info.pages - 1, info.pages // 2)
+            else:
+                # st.slider raises when min == max, which took the whole page
+                # down on any one-page document -- there is nothing to choose
+                # between, so do not ask.
+                idx = 0
+            if split:
+                left, right, gutter, band = render_halves(
+                    str(pdf_path), idx, 110, stat.st_mtime
+                )
+                p1, p2 = st.columns(2)
+                p1.image(left, caption=f"page {idx} · left", width="stretch")
+                p2.image(right, caption=f"page {idx} · right", width="stretch")
+                st.caption(f"Cut at {gutter:.1%} of width (blank band {band:.1%} wide)")
+            else:
+                st.image(
+                    render_page(str(pdf_path), idx, 110, stat.st_mtime),
+                    caption=f"page {idx}",
+                    width="stretch",
+                )
+
+    # Monitoring, full width: it only has something to say once a run exists.
+    progress_panel(out_dir, int(chunk_size), total_chunks)
 
 # ==========================================================================
 # Result -- the Markdown, what verification makes of it, and how to take it away
@@ -688,12 +748,21 @@ with tab_result:
             source_for_check.stat().st_mtime if checked else 0.0,
             ocr,
         )
-        cols = st.columns(len(findings))
-        for col, f in zip(cols, findings, strict=True):  # cols built from len(findings)
-            col.metric(f.name, "ok" if f.ok else "FAIL", help=f.detail, border=True)
-        for f in findings:
-            if not f.ok:
-                st.error(f"**{f.name}** — {f.detail}", icon=":material/warning:")
+        # Outcome first, in one line; the per-check cards are details. Five
+        # equal cards made the verdict take five glances, and pushed the
+        # download -- what this tab is for -- to the bottom.
+        failed = [f for f in findings if not f.ok]
+        if failed:
+            st.error(
+                f"{len(failed)} of {len(findings)} checks failed: "
+                + ", ".join(f.name for f in failed)
+                + ". Read the details below before relying on this text.",
+                icon=":material/warning:",
+            )
+        else:
+            st.success(
+                f"All {len(findings)} checks passed.", icon=":material/check_circle:"
+            )
 
         image_dir = bt_queue.resolve_image_dir(out_dir, pdf_path.stem)
         figures = sorted(image_dir.glob("*.*"))
@@ -719,6 +788,14 @@ with tab_result:
                 mime="application/zip",
                 icon=":material/folder_zip:",
             )
+
+        # Open while something failed: then the detail *is* the next step.
+        with st.expander("Check details", expanded=bool(failed)):
+            cols = st.columns(len(findings))
+            for col, f in zip(cols, findings, strict=True):  # built from len(findings)
+                col.metric(f.name, "ok" if f.ok else "FAIL", help=f.detail, border=True)
+            for f in failed:
+                st.markdown(f"**{f.name}** — {f.detail}")
 
         if figures:
             with st.expander(f"Figures ({len(figures)})"):
@@ -943,12 +1020,13 @@ with tab_translate:
                     except RuntimeError as exc:
                         st.error(str(exc), icon=":material/error:")
                 if t_job.chunks_done and row.button(
-                    "Clear progress", key="clear-translate"
+                    "Clear progress", key="clear-translate", icon=":material/delete_sweep:"
                 ):
-                    for f in t_spec.chunk_dir.glob("*.md"):
-                        f.unlink()
-                    jobs.translate_lock_path(out_dir).unlink(missing_ok=True)
-                    st.rerun()
+                    confirm_clear(
+                        sorted(t_spec.chunk_dir.glob("*.md")),
+                        lambda: jobs.translate_lock_path(out_dir).unlink(missing_ok=True),
+                        "translated",
+                    )
 
             translation_panel(out_dir, translated_md)
 
@@ -1013,21 +1091,25 @@ with tab_queue:
                 except RuntimeError as exc:
                     st.error(str(exc), icon=":material/error:")
 
-        if "worker_cmd" in st.session_state:
-            st.caption("Last command run from this page")
-            st.code(st.session_state["worker_cmd"], language="bash")
-        elif worker:
-            stop_preview = [f"kill -TERM {worker}"]
-            if also_job:
-                stop_preview += [
-                    shlex.join(["kill", "-TERM", *map(str, r.pids)]) for r in runs
-                ]
-                stop_preview.append("pkill -f llama-server")
-            st.caption("Stop runs")
-            st.code("\n".join(stop_preview), language="bash")
-        else:
-            st.caption(f"Start runs (output goes to `{worker_log}`)")
-            st.code(start_preview, language="bash")
+        # Diagnostic, so collapsed -- except right after a click, when "what did
+        # that just run?" is the question on the reader's mind.
+        ran = "worker_cmd" in st.session_state
+        with st.expander("Shell commands", expanded=ran):
+            if ran:
+                st.caption("Last command run from this page")
+                st.code(st.session_state["worker_cmd"], language="bash")
+            elif worker:
+                stop_preview = [f"kill -TERM {worker}"]
+                if also_job:
+                    stop_preview += [
+                        shlex.join(["kill", "-TERM", *map(str, r.pids)]) for r in runs
+                    ]
+                    stop_preview.append("pkill -f llama-server")
+                st.caption("Stop runs")
+                st.code("\n".join(stop_preview), language="bash")
+            else:
+                st.caption(f"Start runs (output goes to `{worker_log}`)")
+                st.code(start_preview, language="bash")
 
     st.subheader("Queue")
     queue_states = bt_queue.survey()

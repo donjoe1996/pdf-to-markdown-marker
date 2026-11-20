@@ -515,6 +515,15 @@ with tab_transcribe:
                 help="Off reads the PDF's existing text layer instead — seconds "
                 "rather than hours, but only right when that layer is trustworthy.",
             )
+            engine = st.selectbox(
+                "Engine",
+                ["marker", "docling"],
+                index=0 if info.recommend_ocr else 1,
+                help="marker reads page images with a vision model — right for "
+                "scanned books. Docling uses layout and table-structure models "
+                "and, with Run OCR off, the PDF's own text — right for journal "
+                "articles with tables.",
+            )
             images = st.checkbox(
                 "Extract figures",
                 value=False,
@@ -607,6 +616,7 @@ with tab_transcribe:
         pages=pages.strip() or None,
         total_pages=total_pages,
         images=images,
+        engine=engine,
     )
 
     with st.container(border=True):

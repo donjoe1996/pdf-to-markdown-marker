@@ -103,10 +103,26 @@ def check_torch_device() -> Check:
     return Check("torch", True, f"{torch.__version__}, device {dev}", fatal=False)
 
 
-def run(require_marker: bool = True) -> list[Check]:
-    checks = [check_python(), check_disk(), check_llama_server()]
+def check_docling() -> Check:
+    if importlib.util.find_spec("docling") is None:
+        return Check("docling", False, "not importable -- run: uv sync")
+    try:
+        from importlib.metadata import version
+
+        v = version("docling")
+    except Exception:
+        v = "unknown"
+    return Check("docling", True, f"version {v}")
+
+
+def run(require_marker: bool = True, engine: str = "marker") -> list[Check]:
+    # Docling runs its models in-process, so it needs no llama-server.
+    checks = [check_python(), check_disk()]
+    if engine != "docling":
+        checks.append(check_llama_server())
     if require_marker:
-        checks += [check_marker(), check_torch_device()]
+        checks += [check_docling() if engine == "docling" else check_marker()]
+        checks.append(check_torch_device())
     return checks
 
 

@@ -13,6 +13,7 @@ dependencies = [
     # The local GUI. Needs >=1.37 for st.fragment(run_every=...), which lets the
     # progress panel refresh without re-running the whole script.
     "streamlit>=1.37",
+    "docling>=2.151.1",
 ]
 
 [project.scripts]

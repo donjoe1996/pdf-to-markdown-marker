@@ -34,6 +34,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pages", default=None, help="source pages, e.g. '8,40-41'")
     ap.add_argument("--chunk-size", type=int, default=20)
     ap.add_argument("--mode", choices=["fast", "balanced"], default="fast")
+    ap.add_argument(
+        "--engine",
+        choices=["marker", "docling"],
+        default="marker",
+        help="OCR/layout engine. 'docling' suits journal articles: a layout model "
+        "plus a table-structure model. Pair it with --no-ocr on a born-digital "
+        "journal, so the text comes from the PDF's own layer. marker remains the "
+        "default for scanned books",
+    )
     ap.add_argument("--dpi", type=int, default=300)
     ap.add_argument("--use-llm", action="store_true")
     ap.add_argument("--no-resume", action="store_true")
@@ -78,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         from bt import preflight
 
         print("== Preflight ==")
-        checks = preflight.run(require_marker=not args.split_only)
+        checks = preflight.run(require_marker=not args.split_only, engine=args.engine)
         if not preflight.report(checks):
             print("\nPreflight failed; fix the items above and re-run.")
             return 1
@@ -116,11 +125,17 @@ def main(argv: list[str] | None = None) -> int:
     # -- Stage 2: marker --------------------------------------------------
     # Models are fetched first so marker's timed server spawns start from cache.
     print("\n== Stage 2a: model warmup ==")
-    from bt.warmup import warm_all
+    if args.engine == "docling":
+        from bt.docling_engine import warm
 
-    warm_all()
+        warm()
+    else:
+        from bt.warmup import warm_all
 
-    print("\n== Stage 2b: %s via marker ==" % ("text extraction" if args.no_ocr else "OCR"))
+        warm_all()
+
+    task = "text extraction" if args.no_ocr else "OCR"
+    print(f"\n== Stage 2b: {task} via {args.engine} ==")
     from bt.transcribe import transcribe
 
     transcribe(
@@ -136,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         ocr=not args.no_ocr,
         extract_images=args.images,
         image_dir=resolve_image_dir(out_dir, args.pdf.stem),
+        engine=args.engine,
     )
 
     # -- Stage 3: cleanup -------------------------------------------------

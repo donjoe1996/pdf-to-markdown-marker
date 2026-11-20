@@ -51,6 +51,7 @@ class JobSpec:
     pages: str | None = None
     total_pages: int = 0  # pages after splitting; drives the progress bar
     images: bool = False
+    engine: str = "marker"
 
     def command(self) -> list[str]:
         cmd = [
@@ -70,6 +71,8 @@ class JobSpec:
             cmd += ["--pages", self.pages]
         if self.images:
             cmd.append("--images")
+        if self.engine != "marker":
+            cmd += ["--engine", self.engine]
         return cmd
 
 

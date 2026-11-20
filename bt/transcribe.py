@@ -224,6 +224,7 @@ def transcribe(
     ocr: bool = True,
     extract_images: bool = False,
     image_dir: Path | None = None,
+    engine: str = "marker",
 ) -> Path:
     """OCR ``pdf_path`` in resumable chunks and concatenate to ``out_md``.
 
@@ -236,8 +237,6 @@ def transcribe(
     """
     images_at = image_dir or resolve_image_dir(out_md.parent, out_md.stem)
     rel_dir = images_at.name
-    from marker.models import create_model_dict, shutdown_models
-
     chunk_dir.mkdir(parents=True, exist_ok=True)
     bounds = [
         (s, min(s + chunk_size - 1, total_pages - 1))
@@ -255,7 +254,15 @@ def transcribe(
     if not pending:
         return concatenate(chunk_dir, out_md, bounds)
 
-    artifacts = create_model_dict()
+    if engine == "docling":
+        from bt import docling_engine
+
+        converter = docling_engine.make_converter(ocr, extract_images, dpi)
+        artifacts = None
+    else:
+        from marker.models import create_model_dict, shutdown_models
+
+        artifacts = create_model_dict()
     stopped_early = False
     try:
         for n, (first, last) in enumerate(pending, 1):
@@ -271,16 +278,21 @@ def transcribe(
 
             target = chunk_path(chunk_dir, first, last)
             started = time.time()
-            config = build_config(
-                f"{first}-{last}",
-                mode=mode,
-                dpi=dpi,
-                use_llm=use_llm,
-                ocr=ocr,
-                extract_images=extract_images,
-            )
-            converter = make_converter(config, artifacts)
-            text, images = convert_range(converter, pdf_path)
+            if engine == "docling":
+                text, images = docling_engine.convert_range(
+                    converter, pdf_path, first, last, extract_images
+                )
+            else:
+                config = build_config(
+                    f"{first}-{last}",
+                    mode=mode,
+                    dpi=dpi,
+                    use_llm=use_llm,
+                    ocr=ocr,
+                    extract_images=extract_images,
+                )
+                converter = make_converter(config, artifacts)
+                text, images = convert_range(converter, pdf_path)
             if images:
                 # Images first, then the chunk that links them. An interrupt
                 # between the two leaves orphan image files, which the redone
@@ -300,7 +312,8 @@ def transcribe(
                 f"({elapsed:.0f}s, {elapsed / pages:.1f}s/page)"
             )
     finally:
-        shutdown_models(artifacts)
+        if artifacts is not None:
+            shutdown_models(artifacts)
 
     # A disk-guard stop leaves later chunks unwritten; join what exists so the
     # partial result is still usable, rather than failing on the missing ones.

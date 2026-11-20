@@ -150,6 +150,23 @@ at.selectbox[0].set_value("meditationsofmar00marc.pdf").run()
 imported**. Keep marker/torch imports function-local in those modules — hoisting
 them to module scope silently breaks the env setup.
 
+## Docling engine (`bt/docling_engine.py`) -- for journals
+
+`--engine docling` (or the GUI's Engine picker) swaps stage 2 for Docling: a
+layout model plus a table-structure model (TableFormer), with text taken from the
+PDF's own layer when `--no-ocr` is set. Use it for born-digital journal articles
+with tables; keep marker for scanned books. It returns what marker returns --
+`{N}----` pages (absolute 0-based `N`) and `_page_N_Figure_K.jpeg` images -- so
+postprocess/verify/audit/translate cannot tell the engines apart. Docling numbers
+pages from 1; every index crosses that boundary once, in `render_pages`/
+`convert_range`. It needs no `llama-server` (preflight skips that check).
+
+**Not yet measured on real output.** The suite builds a real `DoclingDocument`
+by hand; it never runs the models (they download from Hugging Face). Run a
+journal through both engines and compare tables with `bt.verify`/`bt.audit`
+before trusting it. Docling on a *scan* (`ocr=True`) forces full-page OCR but is
+untested against the cropbox-split spreads.
+
 ## Document facts that drive the design
 
 Verified by inspection; do not re-derive:

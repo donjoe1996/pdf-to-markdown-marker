@@ -50,6 +50,7 @@ faster still and answers the two questions that matter before a long run.
 |---|---|
 | `adding-a-feature` | **any** new feature, module, behaviour change, refactor or bug fix |
 | `developing-with-streamlit` | editing `app.py` or anything Streamlit |
+| `designing-the-gui` | changing layout, order, labels or wording in `app.py`; any "this is confusing / not intuitive" report |
 
 `.claude/skills/adding-a-feature/SKILL.md` is the blueprint for how work is
 added here: check what is running first, find the seam, pin current behaviour,
@@ -402,6 +403,16 @@ AppTest suite would stop executing every branch in a single run — and catching
 a NameError in a branch the happy path never reaches is the whole reason that
 suite exists. Every tab's children execute on every run, so the net is
 unchanged; `at.tabs[i].label` addresses a section in a test.
+
+**Layout is decided by a procedure, not taste** -- `designing-the-gui`. Each
+element is classified (primary action, decision, state, rare setting,
+explanation, diagnostic, destructive) and placed by rule: Start sits under the
+settings it launches, rare settings (DPI, chunk size, page range, output folder)
+are one "Advanced" click away, Result leads with a one-line verdict, diagnostics
+are collapsed, and clearing progress asks first. Its `scripts/screenshot.sh`
+renders every tab against a seeded copy, so a layout change is looked at, not
+just tested. `AppTest` cannot see an `st.expander` that has an `icon=`, so
+expanders a test looks inside carry none.
 
 **The theme is in `.streamlit/config.toml`,** with both light and dark defined
 and no `base`, so it follows the browser. Colour is reserved for state —

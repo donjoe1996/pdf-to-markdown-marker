@@ -528,3 +528,49 @@ def test_an_uploaded_book_opens_and_stays_open(make_pdf, tmp_path):
 
     at.run()  # any later interaction reruns the whole script
     assert at.sidebar.selectbox[0].value == "uploads/new.pdf"
+
+
+# --------------------------------------------------------------------------
+# layout promises (see .claude/skills/designing-the-gui)
+# --------------------------------------------------------------------------
+def test_clear_progress_asks_before_deleting(finished_book):
+    """REGRESSION: one click on "Clear progress" deleted every finished chunk.
+
+    Hours of OCR, gone without a question, from a secondary button sitting next
+    to Resume. The click now opens a confirmation that names what will be lost;
+    the files survive the click itself.
+    """
+    pdf, out = finished_book
+    chunk = out / "chunks" / "0000-0009.md"
+    chunk.write_text("transcribed", encoding="utf-8")
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+
+    clear = next(b for b in _tab(at, "Transcribe").button if b.label == "Clear progress")
+    clear.click().run()
+
+    assert not at.exception, [str(e.value) for e in at.exception]
+    assert chunk.exists()
+    assert any(b.label.startswith("Delete 1 chunk") for b in at.button)
+
+
+def test_rare_settings_are_behind_advanced(finished_book):
+    """DPI, chunk size and page range are changed on few runs (DPI is measured
+    not to change speed at all), so they sit one click away instead of competing
+    with the split/OCR/engine decisions that matter on every run."""
+    pdf, _ = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+
+    advanced = next(e for e in _tab(at, "Transcribe").expander if "Advanced" in e.label)
+    assert [s.label for s in advanced.select_slider] == ["DPI"]
+    assert [n.label for n in advanced.number_input] == ["Pages per chunk"]
+    assert any(t.label.startswith("Page range") for t in advanced.text_input)
+
+
+def test_result_leads_with_a_one_line_verdict(finished_book):
+    """The outcome used to take five metric cards to read. A single line now
+    says how many checks failed, ahead of the download; the cards are details."""
+    pdf, _ = finished_book
+    at = _open(AppTest.from_file(APP, default_timeout=TIMEOUT), pdf)
+
+    result = _tab(at, "Result")
+    assert any("of" in e.value and "checks failed" in e.value for e in result.error)
